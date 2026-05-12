@@ -1,0 +1,11 @@
+{
+  "name": "Default 9:16",
+  "width": 1080,
+  "height": 1920,
+  "top_overlay_px": 480,
+  "middle_video_px": 960,
+  "bottom_reserved_px": 480,
+  "fps": 30,
+  "video_crf": 20,
+  "overlay_background_alpha": 0.62
+}
