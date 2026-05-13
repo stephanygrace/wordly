@@ -69,3 +69,22 @@ def format_timecode(seconds: float) -> str:
 def validate_range(start_s: float, end_s: float) -> None:
     if end_s <= start_s:
         raise ValueError("End time must be greater than start time.")
+
+
+def validate_segment_times(
+    start_text: str,
+    end_text: str,
+    *,
+    media_duration_s: float | None = None,
+) -> tuple[float, float]:
+    """Parse start/end timecodes and ensure they form a valid in-bounds segment."""
+    start = parse_timecode(start_text).total_seconds
+    end = parse_timecode(end_text).total_seconds
+    validate_range(start, end)
+    if media_duration_s is not None and media_duration_s > 0:
+        dur_label = format_timecode(media_duration_s)
+        if start > media_duration_s:
+            raise ValueError(f"Start is after the sermon ends ({dur_label}).")
+        if end > media_duration_s:
+            raise ValueError(f"End is after the sermon ends ({dur_label}).")
+    return start, end

@@ -6,12 +6,11 @@ DOWNLOADS = ROOT / "downloads"
 CLIPS = ROOT / "clips"
 EXPORTS = ROOT / "exports"
 TEMP = ROOT / "temp"
-TEMPLATES = ROOT / "templates"
 ASSETS = ROOT / "assets"
 
 
 def ensure_directories() -> None:
-    for folder in (DOWNLOADS, CLIPS, EXPORTS, TEMP, TEMPLATES, ASSETS):
+    for folder in (DOWNLOADS, CLIPS, EXPORTS, TEMP, ASSETS):
         folder.mkdir(parents=True, exist_ok=True)
-    for sub in ("fonts", "logos", "overlays", "music"):
+    for sub in ("filmora_templates", "music"):
         (ASSETS / sub).mkdir(parents=True, exist_ok=True)
