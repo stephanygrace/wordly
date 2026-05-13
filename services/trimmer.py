@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from utils.timecode import parse_timecode, validate_range
 
@@ -23,17 +27,25 @@ def parse_trim_times(start_text: str, end_text: str) -> TrimSpec:
     )
 
 
-def trim_ffmpeg_args(start_s: float, end_s: float) -> tuple[str, str]:
-    """Return (trim_start, trim_end) as strings for FFmpeg -ss/-to style filters."""
-    return f"{start_s:.3f}", f"{end_s:.3f}"
+def clamp_trim_to_duration(spec: TrimSpec, media_duration_s: float) -> TrimSpec:
+    """Clamp start/end so they stay inside [0, media_duration] with positive length."""
+    if media_duration_s <= 0:
+        raise ValueError("Media duration must be positive.")
+    start = max(0.0, min(spec.start_seconds, media_duration_s - 0.05))
+    end = max(0.0, min(spec.end_seconds, media_duration_s))
+    if end <= start:
+        end = min(media_duration_s, start + min(1.0, media_duration_s - start))
+    if end <= start:
+        raise ValueError("Clip length is too short after clamping to file duration.")
+    return TrimSpec(
+        start_seconds=start,
+        end_seconds=end,
+        duration_seconds=end - start,
+    )
 
 
 def ffprobe_duration_seconds(video_path: Path) -> float:
     """Return container duration in seconds using ffprobe."""
-    import json
-    import shutil
-    import subprocess
-
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
         raise RuntimeError("ffprobe not found on PATH. Install FFmpeg.")
@@ -54,3 +66,27 @@ def ffprobe_duration_seconds(video_path: Path) -> float:
     if dur <= 0:
         raise ValueError("Could not read a positive duration from the media file.")
     return dur
+
+
+def ffprobe_has_audio(video_path: Path) -> bool:
+    """Return True if the file has at least one audio stream."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return False
+
+    cmd = [
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "a",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "csv=p=0",
+        str(video_path),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        return False
+    return bool(r.stdout.strip())

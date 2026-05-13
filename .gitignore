@@ -48,6 +48,6 @@ Desktop.ini
 /temp/
 /clips/
 
-# Optional: local media dropped into assets (uncomment if you store large binaries there)
-# /assets/music/*
-# !/assets/music/.gitkeep
+# Downloaded instrumentals (yt-dlp cache; recreated by the wizard)
+/assets/music/*
+!/assets/music/.gitkeep

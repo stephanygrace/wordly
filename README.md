@@ -1,115 +1,117 @@
 # Wordly
 
-**Wordly** is a desktop sermon highlight production tool for church media teams. It helps editors produce **vertical (9:16) sermon reels** for social media by automating repetitive steps—download, trim, verse overlay, background music mix, and export—while keeping **timing, verse copy, music, and levels** under manual control.
+Desktop wizard for church media teams: download a Facebook sermon, trim multiple highlights, pick a Bible verse and instrumental by theme, and export a **Filmora 14.2.9** `.wfp` project with separate editable tracks.
 
-This is **not** a full nonlinear editor (like Premiere or DaVinci Resolve). It is a **template-based, semi-automated** pipeline built around FFmpeg.
+## Workflow
 
-## Features (MVP)
+1. **Download** — paste a Facebook URL (fast yt-dlp + aria2c, or Internet Download Manager on Windows)
+2. **Timestamps** — add one or more start/end ranges
+3. **Preview** — scrub each segment
+4. **Trim & join** — FFmpeg trims and concatenates highlights
+5. **Bible verse** — enter a theme; AI suggests verses (offline fallback without API key)
+6. **Instrumental** — AI suggests beds; download the one you pick
+7. **Layers** — review sermon / verse / music tracks
+8. **Project name**
+9. **Export** — writes `exports/<name>.wfp` for Filmora 14.2.9
 
-- Download sermon video from a **Facebook / Facebook Live** URL (`yt-dlp`)
-- **Open a local video** if download is not possible
-- **Start / end** timecodes with **±1s** and **±5s** nudges
-- **Embedded preview** (play, pause, seek; optional loop inside the trim window)
-- **Bible verse overlay** (reference + text) in the top section of the vertical frame
-- **Background instrumental** (local audio file) with independent **sermon** and **music** volume and optional **fade in / out** on the bed
-- Export **1080×1920**, **H.264** video + **AAC** audio to `exports/`
+## Requirements
 
-Future ideas (not in this repo scope yet): Whisper captions, ASS subtitles, AI highlight detection, cloud upload.
+- Python 3.12+
+- FFmpeg / ffprobe on `PATH`
+- **Filmora 14.2.9** to open the exported project
+- Optional: `aria2c` (faster downloads), `OPENAI_API_KEY` (smarter verse/music suggestions)
 
-## Tech stack
+### Install FFmpeg
 
-| Area | Technology |
-|------|------------|
-| Language | **Python 3.12+** |
-| UI | **PySide6** (Qt 6) |
-| Preview | **Qt Multimedia** (`QMediaPlayer`, `QVideoWidget`) |
-| Download | **yt-dlp** |
-| Render | **FFmpeg** (subprocess; `libx264`, `aac`) |
-
-## Prerequisites
-
-1. **Python 3.12 or newer**
-2. **FFmpeg** on your system `PATH` (must include `ffmpeg`; `ffprobe` is useful for future tooling)
-3. **Internet access** when using **Download** (yt-dlp)
-
-### Installing FFmpeg
-
-- **Windows:** Install from [ffmpeg.org](https://ffmpeg.org/download.html) or a package manager (e.g. Chocolatey: `choco install ffmpeg`), then ensure `ffmpeg` is available in a terminal.
+- **Windows:** [ffmpeg.org](https://ffmpeg.org/download.html) or `choco install ffmpeg`
 - **macOS:** `brew install ffmpeg`
-- **Linux:** `sudo apt install ffmpeg` (Debian/Ubuntu) or your distro equivalent.
+- **Linux / WSL:** `sudo apt install ffmpeg`
 
-### Qt Multimedia / video preview
+Optional faster downloads: `sudo apt install aria2` (Linux/WSL) or install aria2c on Windows.
 
-- **Windows:** Usually works out of the box with the PySide6 wheels.
-- **Linux / WSL:** You may need extra GStreamer (or distro-specific) packages if the preview shows no video; rendering via FFmpeg still works if preview does not.
+## Install
 
-## Installation
-
-Clone or copy the project, then from the project root:
+From the project root:
 
 ```bash
+git clone <repo-url> wordly
+cd wordly
 python3 -m venv .venv
+```
+
+**Linux / macOS / WSL:**
+
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+**Windows (PowerShell):**
+
+```powershell
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
 
 **Windows (cmd):**
 
 ```bat
-python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-**Windows (PowerShell) / macOS / Linux:**
+## Run
 
-```bash
-source .venv/bin/activate   # Linux/macOS
-# or:  .venv\Scripts\Activate.ps1   # PowerShell
-
-pip install -r requirements.txt
-```
-
-Dependencies are listed in `requirements.txt` (PySide6, yt-dlp).
-
-## How to run
-
-From the project root (with the virtual environment activated):
+Activate the virtual environment, then:
 
 ```bash
 python main.py
 ```
 
-On first launch, Wordly creates working folders: `downloads/`, `exports/`, `temp/`, `assets/` (including `assets/fonts/`, `assets/music/`, etc.) if they are missing.
+If your system only has `python3`:
 
-## Typical workflow
+```bash
+python3 main.py
+```
 
-1. Paste a **Facebook sermon URL** and click **Download**, or use **Open local file…** for a video you already have.
-2. Set **Start** and **End** times (e.g. `01:25:00` to `01:27:00`); use the nudge buttons to fine-tune.
-3. Preview the clip; use **Play** / **Pause** and the seek bar.
-4. Enter **verse reference** and **verse text**; choose a **background MP3** (or WAV/M4A via the file dialog).
-5. Adjust **sermon** and **piano** volumes and optional **fade in/out** on the bed.
-6. Enter an **output filename** (without extension) and click **Export reel**. The file is written under **`exports/`**.
+On first launch, Wordly creates `downloads/`, `clips/`, `exports/`, and `temp/` if they are missing.
 
-## Optional: verse overlay font
+### Optional environment variables
 
-If FFmpeg **drawtext** fails because no font is found, place a **`.ttf`** or **`.otf`** file in `assets/fonts/`. Wordly uses the first font file it finds there for overlays.
-
-## Facebook downloads and cookies
-
-Some Facebook URLs require authentication or cookies. If download fails, use **Open local file…** after saving the sermon with another tool, or configure **yt-dlp** with cookies (see [yt-dlp README](https://github.com/yt-dlp/yt-dlp#readme); cookie options are not wired in the UI in the MVP).
+```bash
+export OPENAI_API_KEY=sk-...          # smarter verse / instrumental suggestions
+export WORDLY_OPENAI_MODEL=gpt-4o-mini  # optional model override
+```
 
 ## Project layout
 
 ```
 wordly/
-├── main.py              # Application entry
-├── requirements.txt
-├── assets/              # Fonts, logos, overlays, default music (optional)
-├── downloads/           # yt-dlp output
-├── clips/               # Reserved for future clip workflows
-├── exports/             # Final MP4 renders
-├── temp/                # Temporary overlay text files during export
-├── templates/           # Reserved for future templates
-├── services/            # downloader, trimmer, audio_mixer, renderer
-├── ui/                  # main_window, controls_panel, preview_player
-└── utils/               # paths, timecode parsing
+├── main.py
+├── models/              # wizard project state
+├── services/            # download, trim, AI, Filmora .wfp export
+├── ui/                  # wizard_window, preview_player
+├── utils/
+├── assets/
+│   └── filmora_templates/filmora_14_2_9.wfp   # Filmora 14.2.9 reference project
+├── downloads/           # sermon sources
+├── clips/               # trimmed / joined segments
+├── exports/             # .wfp output
+└── tests/
+```
+
+## Filmora export
+
+Wordly clones `assets/filmora_templates/filmora_14_2_9.wfp` and patches media paths for your joined highlight clip and instrumental. Media paths are written for **Windows Filmora** (`C:\...` or `\\wsl$\...` when running in WSL).
+
+Replace the template with your own blank Filmora 14.2.9 project if needed. Inspect any `.wfp`:
+
+```bash
+python tools/inspect_wfp.py path/to/project.wfp
+```
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -p 'test_*.py' -v
 ```
