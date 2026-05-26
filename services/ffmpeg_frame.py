@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import shutil
 import subprocess
 import uuid
 from pathlib import Path
 
+from utils.ffmpeg_paths import require_ffmpeg
 from utils.paths import TEMP
 
 
@@ -14,9 +14,7 @@ def extract_preview_frame(video_path: Path, time_s: float) -> Path:
 
     Returns path to a JPEG in ``temp/``. Raises RuntimeError on failure.
     """
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg not found on PATH.")
+    ffmpeg = require_ffmpeg()
 
     TEMP.mkdir(parents=True, exist_ok=True)
     out = TEMP / f"preview_{uuid.uuid4().hex}.jpg"
