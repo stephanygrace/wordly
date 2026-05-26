@@ -46,7 +46,6 @@ class ProjectState:
 
     fb_url: str = ""
     cookies_file: Optional[Path] = None
-    use_idm: bool = False
     sermon_path: Optional[Path] = None
     sermon_duration_s: float = 0.0
     segments: list[ClipSegment] = field(default_factory=list)
