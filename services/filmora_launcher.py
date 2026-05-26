@@ -29,6 +29,13 @@ def open_filmora_project(wfp_path: Path) -> None:
         raise FileNotFoundError(f"Project file not found: {wfp}")
 
     if os.name == "nt":
+        filmora = _find_filmora_exe()
+        if filmora is not None:
+            subprocess.Popen(
+                [str(filmora), str(wfp)],
+                start_new_session=True,
+            )
+            return
         os.startfile(wfp)  # type: ignore[attr-defined]
         return
 
