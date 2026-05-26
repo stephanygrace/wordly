@@ -3,14 +3,13 @@ from __future__ import annotations
 import os
 import platform
 import threading
-from functools import partial
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPoint, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QMoveEvent, QResizeEvent
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtGui import QCursor, QMoveEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
+    QApplication,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -34,7 +33,6 @@ from PySide6.QtWidgets import (
 from models.project import ClipSegment, MusicChoice, ProjectState, VerseChoice
 from services.ai_assistant import suggest_bible_verses, suggest_instrumentals
 from services.downloader import download_facebook_video
-from services.download_backend import aria2c_available, find_idm_executable, idm_available
 from services.multi_clip import trim_and_join_segments
 from services.music_downloader import AUDIO_EXTENSIONS, download_instrumental
 from services.trimmer import ffprobe_duration_seconds
@@ -46,11 +44,9 @@ from ui.preview_player import PreviewPlayer
 from utils.app_settings import (
     KEY_LAST_COOKIES_FILE,
     KEY_LAST_FB_URL,
-    KEY_USE_IDM,
-    KEY_USE_IDM_WSL_MIGRATION,
     settings,
 )
-from utils.console_log import log_progress, log_step
+from utils.console_log import log_error, log_info, log_progress, log_step, log_warn
 from utils.paths import DOWNLOADS, ensure_directories
 from utils.timecode import format_timecode, parse_timecode, validate_segment_times
 
@@ -86,6 +82,29 @@ class _JobWorker(QObject):
 
 def _running_on_wsl() -> bool:
     return bool(os.environ.get("WSL_DISTRO_NAME")) or "microsoft" in platform.release().lower()
+
+
+_WSL_RESIZE_MARGIN = 8
+
+
+def _cursor_for_resize_edges(edges: Qt.Edge) -> Qt.CursorShape | None:
+    if edges == Qt.Edge(0):
+        return None
+    if edges in (Qt.Edge.LeftEdge, Qt.Edge.RightEdge):
+        return Qt.CursorShape.SizeHorCursor
+    if edges in (Qt.Edge.TopEdge, Qt.Edge.BottomEdge):
+        return Qt.CursorShape.SizeVerCursor
+    if edges in (
+        Qt.Edge.LeftEdge | Qt.Edge.TopEdge,
+        Qt.Edge.RightEdge | Qt.Edge.BottomEdge,
+    ):
+        return Qt.CursorShape.SizeFDiagCursor
+    if edges in (
+        Qt.Edge.RightEdge | Qt.Edge.TopEdge,
+        Qt.Edge.LeftEdge | Qt.Edge.BottomEdge,
+    ):
+        return Qt.CursorShape.SizeBDiagCursor
+    return None
 
 
 class _WslTitleBar(QWidget):
@@ -134,6 +153,17 @@ class _WslTitleBar(QWidget):
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            child = self.childAt(event.position().toPoint())
+            if isinstance(child, QPushButton):
+                super().mousePressEvent(event)
+                return
+            if self._window._try_wsl_resize_at_global(event.globalPosition().toPoint()):
+                event.accept()
+                return
+            handle = self._window.windowHandle()
+            if handle is not None and handle.startSystemMove():
+                event.accept()
+                return
             self._drag_origin = event.globalPosition().toPoint() - self._window.frameGeometry().topLeft()
             event.accept()
             return
@@ -191,7 +221,7 @@ class WizardWindow(QMainWindow):
         self._job_on_ok = None
         self._job_on_fail = None
         self._busy = False
-        self._nudge_buttons: list[QPushButton] = []
+        self._last_step_index = 0
         self._wsl_repaint_hardening = _running_on_wsl()
 
         self._step_ticks: list[QFrame] = []
@@ -276,8 +306,52 @@ class WizardWindow(QMainWindow):
         self._restore_prefs()
         self._update_nav()
         self._refresh_timestamp_hints()
+        if self._wsl_repaint_hardening:
+            app = QApplication.instance()
+            if app is not None:
+                app.installEventFilter(self)
 
     # --- Chrome ------------------------------------------------------------
+
+    def _wsl_resize_edges(self, local_pos: QPoint) -> Qt.Edge:
+        margin = _WSL_RESIZE_MARGIN
+        edges = Qt.Edge(0)
+        if local_pos.x() <= margin:
+            edges |= Qt.Edge.LeftEdge
+        if local_pos.x() >= self.width() - margin:
+            edges |= Qt.Edge.RightEdge
+        if local_pos.y() <= margin:
+            edges |= Qt.Edge.TopEdge
+        if local_pos.y() >= self.height() - margin:
+            edges |= Qt.Edge.BottomEdge
+        return edges
+
+    def _try_wsl_resize_at_global(self, global_pos: QPoint) -> bool:
+        edges = self._wsl_resize_edges(self.mapFromGlobal(global_pos))
+        if edges == Qt.Edge(0):
+            return False
+        handle = self.windowHandle()
+        if handle is None:
+            return False
+        return handle.startSystemResize(edges)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if not self._wsl_repaint_hardening:
+            return super().eventFilter(watched, event)
+        if not isinstance(watched, QWidget) or watched.window() is not self:
+            return super().eventFilter(watched, event)
+        if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            if self._try_wsl_resize_at_global(event.globalPosition().toPoint()):
+                return True
+        elif event.type() == QEvent.Type.MouseMove and not (event.buttons() & Qt.MouseButton.LeftButton):
+            cursor = _cursor_for_resize_edges(
+                self._wsl_resize_edges(self.mapFromGlobal(event.globalPosition().toPoint()))
+            )
+            if cursor is not None:
+                self.setCursor(QCursor(cursor))
+            else:
+                self.unsetCursor()
+        return super().eventFilter(watched, event)
 
     def _build_step_indicator(self) -> QWidget:
         bar = QWidget()
@@ -502,10 +576,6 @@ class WizardWindow(QMainWindow):
             QPushButton#AccentButton:hover {
                 background-color: #4f6bff;
             }
-            QPushButton#NudgeButton {
-                min-width: 44px;
-                padding: 6px 8px;
-            }
             QPushButton#CancelJobButton:enabled {
                 background-color: #2a2224;
                 border-color: #c85a5a;
@@ -592,7 +662,7 @@ class WizardWindow(QMainWindow):
         title = QLabel("Paste Facebook URL")
         title.setObjectName("StepTitle")
         subtitle = QLabel(
-            "Download the full sermon. Wordly uses parallel fragments and aria2c when available."
+            "Download the full sermon. Wordly uses yt-dlp with parallel fragments."
         )
         subtitle.setObjectName("StepSubtitle")
         subtitle.setWordWrap(True)
@@ -610,23 +680,11 @@ class WizardWindow(QMainWindow):
         cookies_row.addWidget(self._cookies_edit, stretch=1)
         cookies_row.addWidget(cookies_browse)
 
-        self._idm_check = QCheckBox("Use Internet Download Manager (Windows)")
-        self._idm_check.setEnabled(idm_available())
-        self._idm_check.setChecked(idm_available())
-        if not idm_available():
-            self._idm_check.setToolTip("IDMan.exe was not found on this PC.")
-        self._idm_check.toggled.connect(self._refresh_download_backend_note)
-        self._download_backend_note = QLabel()
+        self._download_backend_note = QLabel(
+            "Download backend: yt-dlp with 16 parallel fragments."
+        )
         self._download_backend_note.setObjectName("MutedHelpLabel")
         self._download_backend_note.setWordWrap(True)
-        speed_note = QLabel(
-            "aria2c detected — extra parallel download threads enabled."
-            if aria2c_available()
-            else "Tip: install aria2c for faster yt-dlp downloads, or enable IDM on Windows."
-        )
-        speed_note.setObjectName("MutedHelpLabel")
-        speed_note.setWordWrap(True)
-        self._speed_note = speed_note
 
         self._open_local_btn = QPushButton("Open local sermon instead…")
         self._open_local_btn.clicked.connect(self._open_local_sermon)
@@ -639,11 +697,9 @@ class WizardWindow(QMainWindow):
         form.setSpacing(10)
         form.addRow("Facebook URL", self._url_edit)
         form.addRow("Cookies", cookies_row)
-        form.addRow("", self._idm_check)
 
         layout.addWidget(form_box)
         layout.addWidget(self._download_backend_note)
-        layout.addWidget(speed_note)
         btn_row = QHBoxLayout()
         btn_row.addWidget(self._download_btn)
         btn_row.addWidget(self._open_local_btn)
@@ -653,22 +709,7 @@ class WizardWindow(QMainWindow):
         self._download_result.setWordWrap(True)
         layout.addWidget(self._download_result)
         layout.addStretch()
-        self._refresh_download_backend_note()
         return w
-
-    def _refresh_download_backend_note(self) -> None:
-        if not hasattr(self, "_download_backend_note"):
-            return
-        if idm_available() and self._idm_check.isChecked():
-            exe = find_idm_executable()
-            path = f" ({exe})" if exe else ""
-            self._download_backend_note.setText(
-                f"Download backend: Internet Download Manager{path} — default on this PC."
-            )
-        elif aria2c_available():
-            self._download_backend_note.setText("Download backend: yt-dlp with aria2c parallel threads.")
-        else:
-            self._download_backend_note.setText("Download backend: yt-dlp.")
 
     def _build_timestamps_step(self) -> QWidget:
         w = QWidget()
@@ -716,9 +757,9 @@ class WizardWindow(QMainWindow):
         add_box = QGroupBox("New segment")
         form = QFormLayout(add_box)
         form.setSpacing(8)
-        form.addRow("Start", self._timing_row(self._seg_start, self._nudge_start))
+        form.addRow("Start", self._seg_start)
         form.addRow("", self._seg_start_error)
-        form.addRow("End", self._timing_row(self._seg_end, self._nudge_end))
+        form.addRow("End", self._seg_end)
         form.addRow("", self._seg_end_error)
         form.addRow("Label", self._seg_label)
         form.addRow("", self._seg_range_error)
@@ -753,7 +794,8 @@ class WizardWindow(QMainWindow):
         self._preview_segment = QComboBox()
         self._preview_segment.currentIndexChanged.connect(self._sync_preview_segment)
         layout.addWidget(self._preview_segment)
-        layout.addWidget(self._preview, stretch=1)
+        layout.addWidget(self._preview)
+        layout.addStretch(1)
         return w
 
     def _build_trim_step(self) -> QWidget:
@@ -768,13 +810,9 @@ class WizardWindow(QMainWindow):
         subtitle.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(subtitle)
-        self._trim_result = QLabel("Open this step to trim and join your highlight segments.")
+        self._trim_result = QLabel("Trim and join starts when you leave Preview.")
         self._trim_result.setObjectName("MutedHelpLabel")
         self._trim_result.setWordWrap(True)
-        self._trim_btn = QPushButton("Trim and join now")
-        self._trim_btn.setObjectName("AccentButton")
-        self._trim_btn.clicked.connect(self._start_trim_join)
-        layout.addWidget(self._trim_btn)
         layout.addWidget(self._trim_result)
         layout.addStretch()
         return w
@@ -814,7 +852,8 @@ class WizardWindow(QMainWindow):
         title = QLabel("Instrumental bed")
         title.setObjectName("StepTitle")
         subtitle = QLabel(
-            "Suggest and download a bed, or choose an MP3 already on your computer."
+            "Suggest and download a bed, paste a YouTube (or other) audio URL, "
+            "or choose an MP3 already on your computer."
         )
         subtitle.setObjectName("StepSubtitle")
         subtitle.setWordWrap(True)
@@ -827,6 +866,15 @@ class WizardWindow(QMainWindow):
         self._music_list.itemSelectionChanged.connect(self._pick_music)
         self._download_music_btn = QPushButton("Download selected instrumental")
         self._download_music_btn.clicked.connect(self._download_selected_music)
+
+        self._music_url_edit = QLineEdit()
+        self._music_url_edit.setPlaceholderText("https://www.youtube.com/watch?v=…")
+        self._download_music_url_btn = QPushButton("Download from URL")
+        self._download_music_url_btn.setObjectName("AccentButton")
+        self._download_music_url_btn.clicked.connect(self._download_music_from_url)
+        url_row = QHBoxLayout()
+        url_row.addWidget(self._music_url_edit, stretch=1)
+        url_row.addWidget(self._download_music_url_btn)
 
         self._local_music_btn = QPushButton("Choose local audio…")
         self._local_music_btn.setObjectName("AccentButton")
@@ -844,6 +892,10 @@ class WizardWindow(QMainWindow):
 
         layout.addWidget(suggest_btn)
         layout.addWidget(self._music_list, stretch=1)
+        url_label = QLabel("Or paste an audio URL")
+        url_label.setObjectName("MutedHelpLabel")
+        layout.addWidget(url_label)
+        layout.addLayout(url_row)
         layout.addLayout(local_row)
         layout.addWidget(self._download_music_btn)
         layout.addWidget(self._music_status)
@@ -856,7 +908,11 @@ class WizardWindow(QMainWindow):
         layout.setSpacing(12)
         title = QLabel("Project layers")
         title.setObjectName("StepTitle")
-        subtitle = QLabel("Each element is placed on its own editable Filmora track.")
+        subtitle = QLabel(
+            "Summary of what goes into the Filmora project. The verse becomes an editable "
+            "title layer; sermon segments use the full downloaded video on mirrored video "
+            "tracks (see README). This list is simplified—not every Filmora track is shown."
+        )
         subtitle.setObjectName("StepSubtitle")
         subtitle.setWordWrap(True)
         layout.addWidget(title)
@@ -894,11 +950,13 @@ class WizardWindow(QMainWindow):
         title.setObjectName("StepTitle")
         layout.addWidget(title)
         template_note = QLabel(
-            "Reference template loaded from assets/filmora_templates/filmora_14_2_9.wfp"
+            "Filmora layout is cloned from assets/filmora_templates/sermon-highlights.wfp "
+            "(and video.mp4 / music.mp3 / image.jpg beside it). "
+            "Click Finish, then open exports/<your-project>/<your-project>.wfp with the media/ folder."
             if template_available()
             else (
-                "For best compatibility, save a blank 3-track project from Filmora 14.2.9 as "
-                "assets/filmora_templates/filmora_14_2_9.wfp (optional)."
+                "Add sermon-highlights.wfp plus video.mp4, music.mp3, and image.jpg under "
+                "assets/filmora_templates/ (save from Filmora 14.2.9 on this PC)."
             )
         )
         template_note.setObjectName("MutedHelpLabel")
@@ -949,13 +1007,14 @@ class WizardWindow(QMainWindow):
         can_advance = not self._busy and self._step_complete(idx)
         self._next_btn.setEnabled(can_advance)
         self._next_btn.setText("Finish" if idx == len(titles) - 1 else "Next →")
-        if hasattr(self, "_trim_btn"):
-            self._trim_btn.setEnabled(not self._busy)
         self._progress.setVisible(self._busy)
         self._refresh_step_indicator()
         self._refresh_add_segment_enabled()
 
     def _on_step_changed(self, index: int) -> None:
+        if self._last_step_index == 2 and index != 2 and hasattr(self, "_preview"):
+            self._preview.stop()
+        self._last_step_index = index
         if index == 1:
             self._refresh_timestamp_hints()
         elif index == 2:
@@ -967,11 +1026,16 @@ class WizardWindow(QMainWindow):
         self._update_nav()
 
     def _go_back(self) -> None:
+        if self._stack.currentIndex() == 2 and hasattr(self, "_preview"):
+            self._preview.stop()
         if self._stack.currentIndex() > 0:
             self._stack.setCurrentIndex(self._stack.currentIndex() - 1)
 
     def _go_next(self) -> None:
         idx = self._stack.currentIndex()
+        if idx == 2 and hasattr(self, "_preview"):
+            self._preview.stop()
+            self._ensure_trim_joined()
         if idx == 1 and not self._project.segments:
             QMessageBox.warning(self, "Wordly", "Add at least one timestamp segment.")
             return
@@ -981,7 +1045,7 @@ class WizardWindow(QMainWindow):
                 QMessageBox.warning(
                     self,
                     "Wordly",
-                    "Highlight reel is not ready yet. Wait for trim & join to finish on this step.",
+                    "Highlight reel is not ready yet. Wait for trim & join to finish.",
                 )
                 return
         if idx == 6:
@@ -999,20 +1063,6 @@ class WizardWindow(QMainWindow):
         cookies = s.value(KEY_LAST_COOKIES_FILE, "", type=str)
         if cookies:
             self._cookies_edit.setText(cookies)
-        if hasattr(self, "_idm_check"):
-            self._restore_idm_pref(s)
-            self._refresh_download_backend_note()
-
-    def _restore_idm_pref(self, s) -> None:  # noqa: ANN001
-        if not idm_available():
-            self._idm_check.setChecked(False)
-            return
-        if not s.value(KEY_USE_IDM_WSL_MIGRATION, False, type=bool):
-            self._idm_check.setChecked(True)
-            s.setValue(KEY_USE_IDM, True)
-            s.setValue(KEY_USE_IDM_WSL_MIGRATION, True)
-            return
-        self._idm_check.setChecked(s.value(KEY_USE_IDM, True, type=bool))
 
     def _save_prefs(self) -> None:
         s = settings()
@@ -1020,8 +1070,6 @@ class WizardWindow(QMainWindow):
         cookies = self._cookies_edit.text().strip()
         if cookies:
             s.setValue(KEY_LAST_COOKIES_FILE, cookies)
-        if hasattr(self, "_idm_check"):
-            s.setValue(KEY_USE_IDM, self._idm_check.isChecked())
 
     def _browse_cookies(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Cookies file", "", "Text files (*.txt);;All files (*)")
@@ -1050,6 +1098,7 @@ class WizardWindow(QMainWindow):
         self._download_result.setText(f"Loaded: {path.name} ({dur})")
         self._status.setText(f"Sermon ready — {path}")
         self._refresh_timestamp_hints()
+        self._load_preview_for_current_sermon()
         self._update_nav()
 
     def _refresh_timestamp_hints(self) -> None:
@@ -1062,40 +1111,6 @@ class WizardWindow(QMainWindow):
         else:
             self._seg_duration_hint.setText("Sermon duration: — (load a sermon on step 1)")
         self._on_timestamp_fields_changed()
-
-    def _timing_row(self, field: QLineEdit, nudge_cb) -> QWidget:  # noqa: ANN001
-        wrap = QWidget()
-        row = QHBoxLayout(wrap)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-        row.addWidget(field, stretch=1)
-        for label, delta in (("-5s", -5), ("-1s", -1), ("+1s", 1)):
-            btn = QPushButton(label)
-            btn.setObjectName("NudgeButton")
-            btn.setToolTip(f"Adjust time by {delta:+d} seconds")
-            btn.clicked.connect(partial(self._nudge_and_validate, nudge_cb, field, delta))
-            self._nudge_buttons.append(btn)
-            row.addWidget(btn)
-        return wrap
-
-    def _nudge_and_validate(self, nudge_cb, field: QLineEdit, delta: int) -> None:  # noqa: ANN001
-        nudge_cb(field, delta)
-        self._on_timestamp_fields_changed()
-
-    def _nudge_start(self, field: QLineEdit, delta: int) -> None:
-        self._nudge_field(field, delta)
-
-    def _nudge_end(self, field: QLineEdit, delta: int) -> None:
-        self._nudge_field(field, delta)
-
-    @staticmethod
-    def _nudge_field(field: QLineEdit, delta: int) -> None:
-        text = field.text().strip() or "00:00:00"
-        try:
-            base = parse_timecode(text).total_seconds
-        except ValueError:
-            base = 0.0
-        field.setText(format_timecode(max(0.0, base + float(delta))))
 
     def _field_time_error(self, text: str) -> str | None:
         raw = text.strip()
@@ -1162,27 +1177,11 @@ class WizardWindow(QMainWindow):
         cookies = Path(self._cookies_edit.text()) if self._cookies_edit.text().strip() else None
         self._project.fb_url = url
         self._project.cookies_file = cookies
-        self._project.use_idm = idm_available() and self._idm_check.isChecked()
-        if self._project.use_idm:
-            self._status.setText("Downloading via Internet Download Manager (IDM)…")
-            self._download_result.setText(
-                "Resolving the Facebook stream, then IDM will download it. "
-                "Wordly will auto-import the finished video into downloads/."
-            )
-        elif self._project.use_idm:
-            QMessageBox.warning(
-                self,
-                "Wordly",
-                "IDM is enabled but IDMan.exe was not found. Uncheck IDM or install Internet Download Manager.",
-            )
-            return
 
         def job(*, progress_cb, should_cancel):
-            use_idm = idm_available() and self._idm_check.isChecked()
             return download_facebook_video(
                 url,
                 cookies_file=cookies,
-                use_idm=use_idm,
                 progress_cb=progress_cb,
                 should_cancel=should_cancel,
             )
@@ -1223,9 +1222,13 @@ class WizardWindow(QMainWindow):
         self._update_nav()
 
     def _load_preview_for_current_sermon(self) -> None:
-        if not self._project.sermon_path:
+        if not hasattr(self, "_preview"):
             return
-        self._preview.load_file(self._project.sermon_path)
+        path = self._project.sermon_path
+        if not path:
+            self._preview.clear()
+            return
+        self._preview.load_file(path)
         self._sync_preview_segment()
 
     def _sync_preview_segment(self) -> None:
@@ -1266,7 +1269,6 @@ class WizardWindow(QMainWindow):
             return
 
         self._trim_result.setText("Trimming and joining highlights…")
-        self._trim_btn.setEnabled(False)
         sermon = self._project.sermon_path
         segments = list(self._project.segments)
 
@@ -1281,13 +1283,9 @@ class WizardWindow(QMainWindow):
         def on_ok(path: Path) -> None:
             self._project.joined_clip_path = path
             self._trim_result.setText(f"Joined clip ready:\n{path}")
-            self._trim_btn.setEnabled(True)
             self._update_nav()
 
-        def on_fail():
-            self._trim_btn.setEnabled(True)
-
-        self._run_job(job, on_ok=on_ok, on_fail=on_fail)
+        self._run_job(job, on_ok=on_ok, on_fail=lambda: None)
 
     def _suggest_verses(self) -> None:
         theme = self._theme_edit.text().strip()
@@ -1344,13 +1342,23 @@ class WizardWindow(QMainWindow):
             self._music_status.setText(f"Using local file: {music.local_path.name}")
             return
         query = music.search_query or f"instrumental piano {music.title}"
+        self._run_instrumental_download(query, title=music.title)
 
+    def _download_music_from_url(self) -> None:
+        url = self._music_url_edit.text().strip()
+        if not url:
+            QMessageBox.warning(self, "Wordly", "Paste a YouTube or direct audio URL first.")
+            return
+        self._run_instrumental_download(url, title=url[:80])
+
+    def _run_instrumental_download(self, query: str, *, title: str) -> None:
         def job(*, progress_cb, should_cancel):
             return download_instrumental(query, progress_cb=progress_cb, should_cancel=should_cancel)
 
         def on_ok(path: Path) -> None:
-            music.local_path = path
+            music = MusicChoice(title=title or path.stem, local_path=path)
             self._project.selected_music = music
+            self._music_list.clearSelection()
             self._music_status.setText(f"Downloaded: {path.name}")
             self._update_nav()
 
@@ -1391,18 +1399,33 @@ class WizardWindow(QMainWindow):
 
     def _generate_wfp(self) -> None:
         self._project.project_name = self._project_name_edit.text().strip() or "wordly-project"
+        log_step("export", f"Generate .wfp requested for {self._project.project_name!r}")
+        if self._project.segments:
+            seg_summary = ", ".join(
+                f"{s.start_text}–{s.end_text}" for s in self._project.segments[:4]
+            )
+            log_info("export", f"Segments: {seg_summary}")
+        if self._project.joined_clip_path:
+            log_info("export", f"Joined reel: {self._project.joined_clip_path}")
+        if self._project.sermon_path:
+            log_info("export", f"Sermon source: {self._project.sermon_path}")
         try:
             path = generate_wfp(self._project)
         except Exception as exc:  # noqa: BLE001
+            log_error("export", str(exc))
             QMessageBox.critical(self, "Wordly", str(exc))
             return
-        self._export_result.setText(f"Saved Filmora project: {path}")
+        log_step("export", f"Export finished: {path}")
+        bundle_dir = path.parent
+        self._export_result.setText(f"Saved Filmora project:\n{path}\n\nMedia folder:\n{bundle_dir / 'media'}")
         self._status.setText(f".wfp ready — {path}")
         QMessageBox.information(
             self,
             "Wordly",
             f"Filmora 14.2.9 project saved:\n{path}\n\n"
-            "Wordly will open it in Filmora now. Each layer is on its own track.\n\n"
+            f"All video, music, and verse files are copied to:\n{bundle_dir / 'media'}\n\n"
+            "Keep the .wfp and media/ folder together. Open the .wfp from that folder "
+            "in Filmora 14.2.9 (File → Open Project).\n\n"
             f"{filmora_host_note()}",
         )
         try:
@@ -1494,6 +1517,10 @@ class WizardWindow(QMainWindow):
             self._worker.cancel()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._wsl_repaint_hardening:
+            app = QApplication.instance()
+            if app is not None:
+                app.removeEventFilter(self)
         self._save_prefs()
         if self._worker is not None:
             self._worker.cancel()

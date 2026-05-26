@@ -1,35 +1,15 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Callable, Optional
 
 ShouldCancel = Callable[[], bool]
 
-from services.download_backend import aria2c_available, download_with_idm, find_idm_executable, idm_available
-from utils.console_log import log_info
+from utils.ffmpeg_paths import ffmpeg_bin_dir
 from utils.paths import DOWNLOADS
 
 
 ProgressCallback = Callable[[float, str], None]
-
-
-def _log_download(message: str) -> None:
-    log_info("download", message)
-
-
-def _progress_with_console(
-    progress_cb: Optional[ProgressCallback],
-    *,
-    prefix: str = "",
-) -> ProgressCallback:
-    def emit(ratio: float, message: str) -> None:
-        line = f"{prefix}{message}" if prefix else message
-        _log_download(line)
-        if progress_cb is not None:
-            progress_cb(ratio, line)
-
-    return emit
 
 
 def _fmt_bytes(num: float | int) -> str:
@@ -130,130 +110,6 @@ def _progress_from_postprocessor_hook(d: dict) -> tuple[float, str] | None:
     return None
 
 
-def _find_ffmpeg() -> Optional[str]:
-    return shutil.which("ffmpeg")
-
-
-def _is_facebook_page_url(url: str) -> bool:
-    lower = url.lower()
-    return any(host in lower for host in ("facebook.com", "fb.watch", "fb.com"))
-
-
-def _sanitize_download_stem(name: str, *, fallback: str = "wordly-download") -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in " ._-()[]" else "_" for ch in name.strip())
-    cleaned = " ".join(cleaned.split())
-    return (cleaned[:80] or fallback).strip(" ._-")
-
-
-def _format_score(fmt: dict) -> tuple[int, int, int, int, float]:
-    has_audio = fmt.get("acodec") not in (None, "none")
-    ext = (fmt.get("ext") or "").lower()
-    protocol = (fmt.get("protocol") or "").lower()
-    prefers_mp4 = ext == "mp4"
-    prefers_hls = "m3u8" in protocol or ext == "m3u8"
-    return (
-        1 if has_audio else 0,
-        1 if prefers_mp4 else 0,
-        1 if prefers_hls else 0,
-        int(fmt.get("height") or 0),
-        float(fmt.get("tbr") or 0),
-    )
-
-
-def _pick_direct_format(info: dict) -> tuple[str, dict[str, str]]:
-    """Choose a direct media URL IDM can fetch (not an HTML page)."""
-    direct = info.get("url")
-    if isinstance(direct, str) and direct.startswith(("http://", "https://")):
-        headers = dict(info.get("http_headers") or {})
-        return direct, headers
-
-    requested = info.get("requested_formats") or []
-    if len(requested) == 1:
-        fmt = requested[0]
-        url = fmt.get("url")
-        if isinstance(url, str) and url.startswith(("http://", "https://")):
-            headers = dict(fmt.get("http_headers") or info.get("http_headers") or {})
-            return url, headers
-
-    formats = [fmt for fmt in (info.get("formats") or []) if isinstance(fmt, dict)]
-    ranked = sorted(
-        (
-            fmt
-            for fmt in formats
-            if isinstance(fmt.get("url"), str)
-            and str(fmt["url"]).startswith(("http://", "https://"))
-            and fmt.get("vcodec") not in (None, "none")
-        ),
-        key=_format_score,
-        reverse=True,
-    )
-    if not ranked:
-        raise RuntimeError("yt-dlp did not return a direct media stream URL for this page.")
-
-    # Facebook live often exposes separate audio/video; prefer one combined stream.
-    for fmt in ranked:
-        if fmt.get("acodec") not in (None, "none"):
-            return str(fmt["url"]), dict(fmt.get("http_headers") or info.get("http_headers") or {})
-
-    best = ranked[0]
-    return str(best["url"]), dict(best.get("http_headers") or info.get("http_headers") or {})
-
-
-def _ytdlp_probe_opts(*, cookies_file: Optional[Path] = None) -> dict:
-    opts: dict = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "retries": 10,
-        "format": (
-            "best*[acodec!=none][vcodec!=none]/"
-            "best[ext=mp4][acodec!=none][vcodec!=none]/"
-            "best[acodec!=none][vcodec!=none]/"
-            "best"
-        ),
-    }
-    if cookies_file is not None:
-        cf = cookies_file.expanduser()
-        if cf.is_file():
-            opts["cookiefile"] = str(cf.resolve())
-    ffmpeg = _find_ffmpeg()
-    if ffmpeg:
-        opts["ffmpeg_location"] = str(Path(ffmpeg).parent)
-    return opts
-
-
-def resolve_facebook_direct_url(
-    page_url: str,
-    *,
-    cookies_file: Optional[Path] = None,
-    progress_cb: Optional[ProgressCallback] = None,
-) -> tuple[str, dict[str, str], str]:
-    """
-    Resolve a Facebook page/live URL to a direct media stream URL via yt-dlp.
-
-    IDM cannot download Facebook HTML pages; it needs the signed CDN/HLS URL.
-    """
-    try:
-        import yt_dlp
-    except ImportError as exc:  # pragma: no cover - env guard
-        raise RuntimeError("yt-dlp is not installed. Install requirements.txt.") from exc
-
-    if progress_cb is not None:
-        progress_cb(-1.0, "Resolving Facebook stream URL with yt-dlp…")
-    _log_download("Resolving Facebook page to direct media URL with yt-dlp…")
-
-    with yt_dlp.YoutubeDL(_ytdlp_probe_opts(cookies_file=cookies_file)) as ydl:
-        info = ydl.extract_info(page_url, download=False)
-
-    if not isinstance(info, dict):
-        raise RuntimeError("Could not read video metadata from Facebook.")
-
-    media_url, headers = _pick_direct_format(info)
-    title = _sanitize_download_stem(str(info.get("title") or "wordly-download"))
-    _log_download(f"Resolved direct media URL for IDM ({title})")
-    return media_url, headers, title
-
-
 def download_facebook_video(
     url: str,
     *,
@@ -261,43 +117,17 @@ def download_facebook_video(
     output_dir: Optional[Path] = None,
     should_cancel: Optional[ShouldCancel] = None,
     cookies_file: Optional[Path] = None,
-    use_idm: bool = False,
     concurrent_fragments: int = 16,
 ) -> Path:
-    """
-    Download a Facebook / Facebook Live video with yt-dlp.
+    """Download a Facebook / Facebook Live video with yt-dlp.
 
-  When ``use_idm`` is True on Windows, the URL is handed to Internet Download Manager
-  and Wordly waits for the finished file in ``output_dir``.
+    Uses yt-dlp's built-in HTTP downloader with parallel fragments so
+    progress hooks fire continuously during the download.
 
     Returns path to the merged video file.
     """
     out_dir = output_dir or DOWNLOADS
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    if use_idm:
-        idm_exe = find_idm_executable()
-        if idm_exe is None:
-            raise RuntimeError("Internet Download Manager was not found on this system.")
-        _log_download(f"Downloading via Internet Download Manager (IDM): {idm_exe}")
-        emit = _progress_with_console(progress_cb, prefix="[IDM] ")
-        media_url = url
-        suggested_name: str | None = None
-        if _is_facebook_page_url(url):
-            media_url, _headers, title = resolve_facebook_direct_url(
-                url,
-                cookies_file=cookies_file,
-                progress_cb=emit,
-            )
-            suggested_name = f"{title}.mp4"
-            emit(-1.0, f"Handing direct stream to IDM — {title}")
-        return download_with_idm(
-            media_url,
-            out_dir,
-            progress_cb=emit,
-            should_cancel=should_cancel,
-            suggested_filename=suggested_name,
-        )
 
     try:
         import yt_dlp
@@ -308,7 +138,6 @@ def download_facebook_video(
     template = str(out_dir / "%(title).80s [%(id)s].%(ext)s")
 
     def _emit(ratio: float, msg: str) -> None:
-        _log_download(msg)
         if progress_cb is not None:
             progress_cb(ratio, msg)
 
@@ -337,24 +166,18 @@ def download_facebook_video(
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
         "retries": 10,
         "fragment_retries": 10,
         "concurrent_fragment_downloads": max(1, int(concurrent_fragments)),
         "http_chunk_size": 10 * 1024 * 1024,
     }
 
-    if aria2c_available():
-        ydl_opts["external_downloader"] = "aria2c"
-        ydl_opts["external_downloader_args"] = {
-            "aria2c": ["-x", "16", "-s", "16", "-k", "1M", "--file-allocation=none"]
-        }
-        _emit(-1.0, "Using aria2c for faster parallel download…")
-    else:
-        _emit(-1.0, f"Using yt-dlp with {ydl_opts['concurrent_fragment_downloads']} concurrent fragments…")
+    _emit(-1.0, f"Using yt-dlp with {ydl_opts['concurrent_fragment_downloads']} concurrent fragments…")
 
-    ffmpeg = _find_ffmpeg()
-    if ffmpeg:
-        ydl_opts["ffmpeg_location"] = str(Path(ffmpeg).parent)
+    bin_dir = ffmpeg_bin_dir()
+    if bin_dir:
+        ydl_opts["ffmpeg_location"] = str(bin_dir)
 
     if cookies_file is not None:
         cf = cookies_file.expanduser()
@@ -362,7 +185,7 @@ def download_facebook_video(
             ydl_opts["cookiefile"] = str(cf.resolve())
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        _emit(-1.0, "Fetching video info…")
+        _emit(-1.0, "Fetching video info from Facebook (this can take 10–30s)…")
         info = ydl.extract_info(url, download=True)
 
         path: Path | None = None

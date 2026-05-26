@@ -1,0 +1,189 @@
+{
+  "aspectRatioX": 9,
+  "aspectRatioY": 16,
+  "channels": 2,
+  "format": "s16",
+  "frameRate": {
+    "den": 1001,
+    "num": 30000
+  },
+  "hdrMode": 0,
+  "hdrMode_force_16bit": 0,
+  "resolutionHeight": 1920,
+  "resolutionWidth": 1080,
+  "sampleRate": 44100,
+  "timelineId": 35,
+  "trackInfos": [
+    {
+      "clipList": [
+        {
+          "effectChainList": [
+            {
+              "effectList": [
+                {
+                  "display": "crop-pan-zoom",
+                  "id": "video/effect/crop-pan-zoom",
+                  "thisUId": "c58d61e6-e453-f111-95f1-002b6753ed26",
+                  "type": 3,
+                  "userData": [
+                    {
+                      "data": "ezcxRjUzNTk1LTQwRjYtNGU5Zi04RkE1LURGRTdEOTM2MjQ4RH0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+                      "key": 3,
+                      "size": 64
+                    },
+                    {
+                      "data": "AQ==",
+                      "key": 7,
+                      "size": 1
+                    }
+                  ]
+                },
+                {
+                  "display": "transform",
+                  "id": "video/effect/transform",
+                  "paramList": [
+                    {
+                      "fxParam": {
+                        "paramType": 3,
+                        "unValue": 73.91312408447266
+                      },
+                      "name": "Scale_x"
+                    },
+                    {
+                      "fxParam": {
+                        "paramType": 3,
+                        "unValue": 7.3828125
+                      },
+                      "name": "Scale_y"
+                    },
+                    {
+                      "fxParam": {
+                        "paramType": 3,
+                        "unValue": 0.4995341897010803
+                      },
+                      "name": "Position_x"
+                    },
+                    {
+                      "fxParam": {
+                        "paramType": 3,
+                        "unValue": 0.26325517892837524
+                      },
+                      "name": "Position_y"
+                    },
+                    {
+                      "fxParam": {
+                        "paramType": 5,
+                        "unValue": 1
+                      },
+                      "name": "EnableTransform"
+                    }
+                  ],
+                  "thisUId": "c68d61e6-e453-f111-95f1-002b6753ed26",
+                  "type": 3,
+                  "userData": [
+                    {
+                      "data": "e0JFMjBBMEJGLUNGRkEtNGYyZC1BM0U1LTQ3RkVFNjlCRDdBN30AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+                      "key": 3,
+                      "size": 64
+                    },
+                    {
+                      "data": "AQ==",
+                      "key": 7,
+                      "size": 1
+                    }
+                  ]
+                }
+              ],
+              "name": "Basic"
+            },
+            {
+              "effectList": [],
+              "name": "Effect"
+            }
+          ],
+          "inPoint": 0,
+          "outPoint": 889555333,
+          "pipBuf": "{\"Algorithm\":\"Bilinear\",\"BlendMode\":0,\"BlenderName\":\"video/blender/simple-pip\",\"Enable\":true,\"Opacity\":100.0,\"OpacityKeyFrame\":\"{\\\"Version\\\": 2,\\\"ParameterType\\\": 0,\\\"keyframeSets\\\": [],\\\"MD5\\\":\\\"d41d8cd98f00b204e9800998ecf8427e\\\"}\"}",
+          "pipBufSize": 234,
+          "scriptBuf": "{\"Aspect\":\"16:9\",\"AutoLine\":0,\"AutoLineLimited\":0,\"AutoLineScale\":0.7391312122344971,\"AutoLineVer\":1,\"Background\":{\"Alpha\":255,\"Border\":{\"Alpha\":255,\"Color\":0,\"Enable\":0,\"Gradient\":{\"Angle\":0,\"ColorPos\":[{\"Color\":16777215,\"Pos\":0},{\"Color\":0,\"Pos\":100}],\"Enable\":0,\"GradType\":0,\"GradVer\":\"2.0\"},\"Size\":0},\"Bottom\":2.0,\"Color\":0,\"Enable\":0,\"FillMode\":0,\"Gradient\":{\"Angle\":0,\"ColorPos\":[{\"Color\":16777215,\"Pos\":0},{\"Color\":0,\"Pos\":100}],\"Enable\":0,\"GradType\":0,\"GradVer\":\"2.0\"},\"Left\":2.0,\"Radian\":0,\"Right\":2.0,\"Top\":2.0},\"BasePixel\":0,\"BoldVer\":1,\"ChangeAlignMode\":0,\"CleanAreaSize\":0,\"Curve\":{\"Angle\":180,\"Animation\":{\"Duration\":10000000,\"Enable\":0,\"Loop\":0},\"Distance\":0.0,\"Enable\":0,\"Mode\":0,\"PathType\":0},\"DirectX\":1,\"DirectY\":1,\"Edge\":{\"Bottom\":0.852789580821991,\"Left\":0.42301639914512634,\"Right\":0.42301639914512634,\"Top\":0.12611667811870575},\"FeatureVersion\":1,\"FillTextArea\":0,\"Gradient\":{\"Angle\":0,\"ColorPos\":[{\"Color\":16777215,\"Pos\":0},{\"Color\":0,\"Pos\":100}],\"Enable\":0,\"GradType\":0,\"GradVer\":\"2.0\"},\"Layout\":{\"Angle\":0.0,\"CharSpace\":0,\"LineSpace\":0,\"TextAlign\":\"center\",\"TextAlignMode\":\"horizontal\",\"TextAlignPos\":\"center\",\"Underline\":0,\"UnderlineColor\":-1},\"Offset\":{\"x\":0,\"y\":0},\"OutputTextPath\":0,\"PosX\":0.4995341897010803,\"PosY\":0.26325517892837524,\"Record\":{\"AspectX\":0,\"AspectY\":0,\"AutoLine\":0,\"AutoLineLimited\":0,\"AutoLineScale\":0.0,\"TextMode\":1,\"ViewHeight\":0,\"ViewWidth\":0},\"ScaleX\":0.7391312122344971,\"ScaleY\":0.07382812350988388,\"TemplatePath\":\"\",\"Text\":\"James 1:6\rBut when you ask, you must believe and not doubt.\"\",\"TextData\":[{\"Basic\":{\"Effect\":0,\"Enable\":1,\"FontBold\":0,\"FontHSize\":28.0,\"FontItalic\":0,\"FontName\":\"Outfit SemiBold\",\"FontSize\":28.0,\"FontVSize\":28.0,\"TextAlpha\":255,\"TextBlurRadius\":0,\"TextColor\":[{\"Color\":16777215}]},\"Border\":{\"Alpha\":255,\"BlurRadius\":0,\"Color\":65535,\"Enable\":0,\"Gradient\":{\"Angle\":0,\"ColorPos\":[{\"Color\":16777215,\"Pos\":0},{\"Color\":0,\"Pos\":100}],\"Enable\":0,\"GradType\":0,\"GradVer\":\"2.0\"},\"Size\":5,\"Texture\":{\"Enable\":0,\"File\":\"\",\"FillMode\":0}},\"CharCase\":0,\"CharData\":\"1 Peter 1:15-16\\rBut just as He who called you is holy, so be holy in all you do; for it is written: \u201cBe holy, because I am holy.\\\"\",\"CharSpace\":0,\"LineSpace\":0,\"Shadow\":{\"Alpha\":255,\"BlurRadius\":3,\"Color\":255,\"Direction\":4,\"Distance\":8,\"Enable\":0,\"Gradient\":{\"Angle\":0,\"ColorPos\":[{\"Color\":16777215,\"Pos\":0},{\"Color\":0,\"Pos\":100}],\"Enable\":0,\"GradType\":0,\"GradVer\":\"2.0\"},\"Texture\":{\"Enable\":0,\"File\":\"\",\"FillMode\":0}},\"Underline\":0,\"UnderlineColor\":-1}],\"TextMode\":2,\"TextScale\":1.0,\"TextVersion\":1.0,\"Texture\":{\"Enable\":0,\"File\":\"\",\"FillMode\":0},\"UseDefaultBaseline\":0,\"ViewSize\":\"1080:1920\"}",
+          "scriptBufSize": 2700,
+          "thisUId": "c48d61e6-e453-f111-95f1-002b6753ed26",
+          "tlBegin": 0,
+          "tlEnd": 889555333,
+          "type": 4,
+          "userData": [
+            {
+              "data": "MAA=",
+              "key": 36866,
+              "size": 2
+            },
+            {
+              "data": "TGF5ZXIgMDE=",
+              "key": 50,
+              "size": 8
+            },
+            {
+              "data": "AAAAAA==",
+              "key": 2,
+              "size": 4
+            },
+            {
+              "data": "BgAAAA==",
+              "key": 103,
+              "size": 4
+            },
+            {
+              "data": "eyJLZXlfQW5jZXN0cmFsR3VpZCI6IntjNTk3ZWFjMi1lYWM1LTQ3YTctOTkxOS03ZTNjM2VhNWM4ODV9IiwiS2V5X1RpbWVsaW5lR3VpZCI6Ins3NjI3MmJmMS0wZmYyLTQ3MTktYjgwMy1hNzAxYTRlOTU5M2R9IiwiUmVuZGVyLlJhbmdlVHlwZSI6IjEiLCJjbGlwX2NvbG9yX2luZm90YWciOiI3Iiwia2V5X3RpbWVsaW5lX3Jlc291cmNlX2luZm8iOiJ7XCJuYW1lXCI6XCJDYXB0aW9uXCJ9Iiwia2V5X3RpbWVsaW5lX3R5cGUiOiI1In0A",
+              "key": 55,
+              "size": 249
+            },
+            {
+              "data": "IwAAAA==",
+              "key": 6,
+              "size": 4
+            },
+            {
+              "data": "AQAAAA==",
+              "key": 102,
+              "size": 4
+            },
+            {
+              "data": "e0FGQkI5Q0NELUI0MjAtNGNlNS1CRjdFLUQxOEY5RjJDMTBFMn0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "key": 3,
+              "size": 64
+            },
+            {
+              "data": "BQAAAA==",
+              "key": 1,
+              "size": 4
+            }
+          ]
+        }
+      ],
+      "trackType": 1
+    }
+  ],
+  "type": 1,
+  "userData": [
+    {
+      "data": "MTkyMC4wMDAwMDAA",
+      "key": 36868,
+      "size": 12
+    },
+    {
+      "data": "MTA4MC4wMDAwMDAA",
+      "key": 36869,
+      "size": 12
+    },
+    {
+      "data": "ezFDOEExNkRDLUZGREYtNDY1OS1CODNCLUY4OTA2RTM3QTAxRn0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      "key": 11000,
+      "size": 64
+    },
+    {
+      "data": "ezc3ODI1RDlDLTc2OTAtNDZiZC04OEIzLThBRDk3NjUwQUQ1MH0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      "key": 3,
+      "size": 64
+    }
+  ]
+}

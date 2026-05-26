@@ -57,6 +57,23 @@ def _safe_duration(path: Path, fallback_s: float = 60.0) -> float:
 
 def build_layers(project: ProjectState) -> list[WfpLayer]:
     layers: list[WfpLayer] = []
+    sermon = project.sermon_path.resolve() if project.sermon_path and project.sermon_path.is_file() else None
+    joined = (
+        project.joined_clip_path.resolve()
+        if project.joined_clip_path and project.joined_clip_path.exists()
+        else None
+    )
+    if sermon and joined and sermon != joined:
+        layers.append(
+            WfpLayer(
+                layer_id=_new_id(),
+                name="Sermon source (segment trims)",
+                media_path=sermon,
+                track_type="video",
+                start_us=0,
+                duration_us=_us(_safe_duration(sermon)),
+            )
+        )
     if project.joined_clip_path and project.joined_clip_path.exists():
         dur = _safe_duration(project.joined_clip_path)
         layers.append(

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Callable, Optional
 
-from utils.console_log import log_info, log_progress, log_step
+from utils.console_log import log_info, log_step
+from utils.ffmpeg_paths import ffmpeg_bin_dir
 from utils.paths import ASSETS
 
 ProgressCallback = Callable[[float, str], None]
@@ -13,9 +13,9 @@ ShouldCancel = Callable[[], bool]
 AUDIO_EXTENSIONS = (".mp3", ".m4a", ".opus", ".webm", ".ogg", ".aac", ".wav")
 
 
-def _find_ffmpeg_dir() -> Optional[str]:
-    ffmpeg = shutil.which("ffmpeg")
-    return str(Path(ffmpeg).parent) if ffmpeg else None
+def _looks_like_url(query: str) -> bool:
+    q = query.strip().lower()
+    return q.startswith("http://") or q.startswith("https://")
 
 
 def _resolve_output_path(info: dict, out_dir: Path, ydl) -> Path:
@@ -56,7 +56,6 @@ def _emit(
     ratio: float,
     msg: str,
 ) -> None:
-    log_progress("music", msg, ratio=ratio if ratio >= 0 else None)
     if progress_cb is not None:
         progress_cb(ratio, msg)
 
@@ -68,7 +67,7 @@ def download_instrumental(
     progress_cb: Optional[ProgressCallback] = None,
     should_cancel: Optional[ShouldCancel] = None,
 ) -> Path:
-    """Search YouTube for an instrumental and download native audio (no slow MP3 re-encode)."""
+    """Download instrumental audio via yt-dlp (YouTube search or direct URL)."""
     try:
         import yt_dlp
         from yt_dlp.utils import DownloadCancelled
@@ -79,7 +78,11 @@ def download_instrumental(
     out_dir.mkdir(parents=True, exist_ok=True)
     template = str(out_dir / "%(title).80s [%(id)s].%(ext)s")
     query = search_query.strip()
-    log_step("music", f"Searching YouTube for: {query}")
+    is_url = _looks_like_url(query)
+    if is_url:
+        log_step("music", f"Downloading audio from URL: {query[:120]}")
+    else:
+        log_step("music", f"Searching YouTube for: {query}")
 
     def hook(d: dict) -> None:
         if should_cancel and should_cancel():
@@ -100,24 +103,27 @@ def download_instrumental(
         elif status == "finished":
             _emit(progress_cb, 0.98, "Audio download finished")
 
-    _emit(progress_cb, -1.0, "Searching YouTube…")
-
     ydl_opts: dict = {
         # Prefer YouTube's native m4a/opus audio — skip FFmpegExtractAudio entirely.
         "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
         "outtmpl": template,
-        "default_search": "ytsearch1",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
         "progress_hooks": [hook],
         "retries": 5,
         "socket_timeout": 30,
     }
 
-    ffmpeg_dir = _find_ffmpeg_dir()
-    if ffmpeg_dir:
-        ydl_opts["ffmpeg_location"] = ffmpeg_dir
+    if not is_url:
+        ydl_opts["default_search"] = "ytsearch1"
+
+    bin_dir = ffmpeg_bin_dir()
+    if bin_dir:
+        ydl_opts["ffmpeg_location"] = str(bin_dir)
+
+    _emit(progress_cb, -1.0, "Resolving audio…" if is_url else "Searching YouTube…")
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(query, download=True)

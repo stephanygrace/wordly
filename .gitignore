@@ -51,3 +51,14 @@ Desktop.ini
 # Downloaded instrumentals (yt-dlp cache; recreated by the wizard)
 /assets/music/*
 !/assets/music/.gitkeep
+
+# Filmora template backups & one-off debug tool artifacts
+*.wfp.bak
+/tools/_*
+/tools/*.txt
+/tools/*.json
+
+# Per-PC Filmora template bundle media (point your .wfp at local files)
+/assets/filmora_templates/video.mp4
+/assets/filmora_templates/music.mp3
+/assets/filmora_templates/image.jpg

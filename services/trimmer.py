@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from utils.ffmpeg_paths import require_ffprobe
 from utils.timecode import parse_timecode, validate_range
 
 
@@ -46,12 +46,8 @@ def clamp_trim_to_duration(spec: TrimSpec, media_duration_s: float) -> TrimSpec:
 
 def ffprobe_duration_seconds(video_path: Path) -> float:
     """Return container duration in seconds using ffprobe."""
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        raise RuntimeError("ffprobe not found on PATH. Install FFmpeg.")
-
     cmd = [
-        ffprobe,
+        require_ffprobe(),
         "-v",
         "error",
         "-show_entries",
@@ -70,8 +66,9 @@ def ffprobe_duration_seconds(video_path: Path) -> float:
 
 def ffprobe_has_audio(video_path: Path) -> bool:
     """Return True if the file has at least one audio stream."""
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
+    try:
+        ffprobe = require_ffprobe()
+    except RuntimeError:
         return False
 
     cmd = [

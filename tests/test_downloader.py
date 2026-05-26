@@ -4,8 +4,6 @@ import unittest
 
 from services.downloader import (
     _download_status_message,
-    _is_facebook_page_url,
-    _pick_direct_format,
     _progress_from_postprocessor_hook,
     _progress_from_ytdlp_hook,
 )
@@ -63,46 +61,6 @@ class TestDownloaderProgress(unittest.TestCase):
         self.assertIsNotNone(update)
         _, msg = update  # type: ignore[misc]
         self.assertIn("Merger", msg)
-
-
-class TestIdmUrlResolution(unittest.TestCase):
-    def test_facebook_page_detection(self) -> None:
-        self.assertTrue(_is_facebook_page_url("https://www.facebook.com/watch/live/?v=123"))
-        self.assertTrue(_is_facebook_page_url("https://fb.watch/abc/"))
-        self.assertFalse(_is_facebook_page_url("https://cdn.example.com/video.mp4"))
-
-    def test_pick_direct_format_prefers_combined_stream(self) -> None:
-        info = {
-            "title": "Sunday Service",
-            "formats": [
-                {
-                    "url": "https://cdn.example.com/video_only.mp4",
-                    "vcodec": "avc1",
-                    "acodec": "none",
-                    "ext": "mp4",
-                    "height": 1080,
-                },
-                {
-                    "url": "https://cdn.example.com/video_audio.mp4",
-                    "vcodec": "avc1",
-                    "acodec": "mp4a",
-                    "ext": "mp4",
-                    "height": 720,
-                },
-            ],
-        }
-        url, _headers = _pick_direct_format(info)
-        self.assertEqual(url, "https://cdn.example.com/video_audio.mp4")
-
-    def test_pick_direct_format_uses_top_level_url(self) -> None:
-        info = {
-            "url": "https://cdn.example.com/live.m3u8",
-            "http_headers": {"User-Agent": "test"},
-            "formats": [],
-        }
-        url, headers = _pick_direct_format(info)
-        self.assertEqual(url, "https://cdn.example.com/live.m3u8")
-        self.assertEqual(headers["User-Agent"], "test")
 
 
 if __name__ == "__main__":
