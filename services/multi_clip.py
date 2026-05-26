@@ -11,20 +11,17 @@ from typing import Callable, Optional
 
 from models.project import ClipSegment
 from services.trimmer import ffprobe_has_audio, parse_trim_times
+from utils.ffmpeg_paths import require_ffmpeg
 from utils.ffmpeg_progress import parse_ffmpeg_progress_seconds
 from utils.paths import CLIPS, TEMP
+from utils.subprocess_win import background_creationflags
 
 ProgressCallback = Callable[[float, str], None]
 ShouldCancel = Callable[[], bool]
 
 
 def _ffmpeg() -> str:
-    import shutil
-
-    path = shutil.which("ffmpeg")
-    if not path:
-        raise RuntimeError("ffmpeg not found on PATH.")
-    return path
+    return require_ffmpeg()
 
 
 def _run_ffmpeg(
@@ -35,13 +32,16 @@ def _run_ffmpeg(
     should_cancel: Optional[ShouldCancel],
     status: str,
 ) -> None:
-    proc = subprocess.Popen(
-        cmd,
-        stderr=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        text=True,
-        bufsize=1,
-    )
+    popen_kw: dict = {
+        "stderr": subprocess.PIPE,
+        "stdout": subprocess.DEVNULL,
+        "text": True,
+        "bufsize": 1,
+    }
+    flags = background_creationflags()
+    if flags:
+        popen_kw["creationflags"] = flags
+    proc = subprocess.Popen(cmd, **popen_kw)
     assert proc.stderr is not None
     tail: deque[str] = deque(maxlen=30)
 
