@@ -5,15 +5,25 @@ import platform
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSlider, QStackedLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QSlider,
+    QStackedLayout,
+    QVBoxLayout,
+    QWidget,
+)
 
 from services.ffmpeg_frame import extract_preview_frame
 from services.trimmer import ffprobe_duration_seconds
 from utils.console_log import log_info, log_warn
+from utils.preview_target import PreviewDimensions, preview_target_dimensions
 from utils.timecode import format_timecode
 
 
@@ -25,6 +35,34 @@ def _format_ms_as_timecode(ms: int) -> str:
 
 def _running_on_wsl() -> bool:
     return bool(os.environ.get("WSL_DISTRO_NAME")) or "microsoft" in platform.release().lower()
+
+
+def _preview_target_size(widget: QWidget, host: QWidget) -> QSize:
+    dims = preview_target_dimensions(
+        PreviewDimensions(widget.size().width(), widget.size().height()),
+        PreviewDimensions(host.size().width(), host.size().height()),
+    )
+    return QSize(dims.width, dims.height)
+
+
+class _AspectRatioFrame(QWidget):
+    """Keeps a 16:9 aspect ratio so the video widget inside doesn't grow into
+    a giant black letterbox area when the wizard window is tall."""
+
+    _NUM = 9
+    _DEN = 16
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: D401
+        return True
+
+    def heightForWidth(self, w: int) -> int:  # noqa: D401
+        return max(220, int(w * self._NUM / self._DEN))
 
 
 class PreviewPlayer(QWidget):
@@ -41,17 +79,23 @@ class PreviewPlayer(QWidget):
         self._trim_start_ms = 0
         self._trim_end_ms = 0
         self._scrubbing = False
+        self._was_playing_before_scrub = False
         self._ffmpeg_fallback = False
         self._frame_request_id = 0
 
-        self._stack_host = QWidget()
+        self._stack_host = _AspectRatioFrame()
+        self._stack_host.setObjectName("PreviewStack")
+        self._stack_host.setStyleSheet("QWidget#PreviewStack { background: #16181c; }")
         self._stack = QStackedLayout(self._stack_host)
+        self._stack.setContentsMargins(0, 0, 0, 0)
         self._video = QVideoWidget()
         self._video.setMinimumHeight(220)
+        self._video.setStyleSheet("background: #16181c;")
+        self._video.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._frame = QLabel("No video loaded")
         self._frame.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._frame.setMinimumHeight(220)
-        self._frame.setStyleSheet("background: #111; color: #aaa;")
+        self._frame.setStyleSheet("background: #16181c; color: #aaa;")
         self._stack.addWidget(self._video)
         self._stack.addWidget(self._frame)
 
@@ -87,18 +131,8 @@ class PreviewPlayer(QWidget):
         self._play_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self._play_toggle.clicked.connect(self.toggle_play_pause)
 
-        self._jump_start = QPushButton("Jump to clip start")
-        self._jump_end = QPushButton("Jump to clip end")
-        for btn in (self._jump_start, self._jump_end):
-            btn.setObjectName("PreviewControlButton")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._jump_start.clicked.connect(self.seek_trim_start)
-        self._jump_end.clicked.connect(self.seek_trim_end)
-
         controls = QHBoxLayout()
         controls.addWidget(self._play_toggle)
-        controls.addWidget(self._jump_start)
-        controls.addWidget(self._jump_end)
         controls.addStretch()
 
         self._hint = QLabel("Smooth playback via Qt Multimedia. Scrub the slider to seek within the clip.")
@@ -106,7 +140,7 @@ class PreviewPlayer(QWidget):
         self._hint.setWordWrap(True)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self._stack_host, stretch=1)
+        layout.addWidget(self._stack_host)
         layout.addLayout(controls)
         layout.addWidget(self._time_label)
         layout.addWidget(self._slider)
@@ -114,6 +148,9 @@ class PreviewPlayer(QWidget):
         layout.addWidget(self._hint)
 
         self._frame_ready.connect(self._apply_ffmpeg_frame)
+
+    def has_media(self) -> bool:
+        return self._path is not None
 
     def attach_space_shortcut(self, shortcut_parent: QWidget) -> None:
         sc = QShortcut(QKeySequence(Qt.Key.Key_Space), shortcut_parent)
@@ -139,17 +176,23 @@ class PreviewPlayer(QWidget):
         self._apply_slider_range()
 
     def load_file(self, path: Path) -> None:
+        path = Path(path)
         if not path.exists():
             self._status.setText("File not found")
+            self._frame.setText("File not found")
+            self._stack.setCurrentWidget(self._frame)
             return
         self._player.stop()
         self._path = path.resolve()
         self._ffmpeg_fallback = False
         self._stack.setCurrentWidget(self._video)
+        self._status.setText(f"Loading {path.name}…")
         try:
             self._duration_ms = int(ffprobe_duration_seconds(self._path) * 1000)
         except Exception as exc:  # noqa: BLE001
             self._status.setText(str(exc))
+            self._frame.setText(str(exc))
+            self._stack.setCurrentWidget(self._frame)
             log_warn("preview", str(exc))
             return
         self._apply_slider_range()
@@ -162,10 +205,16 @@ class PreviewPlayer(QWidget):
             self._enable_ffmpeg_preview(
                 "WSL preview uses FFmpeg frame scrub — Qt video output is unreliable here."
             )
-            QTimer.singleShot(0, lambda: self._show_ffmpeg_frame(self._position_ms))
+            self._schedule_ffmpeg_frame(self._position_ms)
+
+    def stop(self) -> None:
+        """Stop playback and release audio (e.g. when leaving the preview step)."""
+        self._scrubbing = False
+        self._was_playing_before_scrub = False
+        self._player.stop()
 
     def clear(self) -> None:
-        self._player.stop()
+        self.stop()
         self._path = None
         self._duration_ms = 0
         self._position_ms = 0
@@ -206,18 +255,25 @@ class PreviewPlayer(QWidget):
 
     def _on_slider_pressed(self) -> None:
         self._scrubbing = True
-        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-            self._player.pause()
+        self._was_playing_before_scrub = (
+            self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        )
 
     def _on_slider_moved(self, value: int) -> None:
         self._position_ms = value
         self._update_time_label(value)
         if self._ffmpeg_fallback:
             self._show_ffmpeg_frame(value)
+        elif self._path and not self._ffmpeg_fallback:
+            ms = self._clamp_position(value)
+            self._player.setPosition(ms)
 
     def _on_slider_released(self) -> None:
         self._scrubbing = False
         self._seek_to(self._slider.value())
+        if self._was_playing_before_scrub:
+            self._was_playing_before_scrub = False
+            self.play()
 
     def _flush_pending_seek(self) -> None:
         pass
@@ -277,14 +333,21 @@ class PreviewPlayer(QWidget):
         self._enable_ffmpeg_preview(
             f"Qt playback unavailable ({message}) — scrub the slider to preview frames."
         )
+        self._schedule_ffmpeg_frame(self._position_ms)
 
     def _enable_ffmpeg_preview(self, status: str) -> None:
         self._ffmpeg_fallback = True
         self._stack.setCurrentWidget(self._frame)
+        self._frame.setPixmap(QPixmap())
+        self._frame.setText("Loading preview…")
         self._player.stop()
-        self._hint.setText("Frame preview via FFmpeg. Scrub the slider or use jump buttons to seek.")
+        self._hint.setText("Frame preview via FFmpeg. Scrub the slider to seek.")
         self._status.setText(status)
         log_warn("preview", status)
+
+    def _schedule_ffmpeg_frame(self, ms: int) -> None:
+        """Defer frame extraction until after layout (avoids zero-size pixmap on first paint)."""
+        QTimer.singleShot(0, lambda: self._show_ffmpeg_frame(ms))
 
     def _show_ffmpeg_frame(self, ms: int) -> None:
         if not self._path:
@@ -292,9 +355,7 @@ class PreviewPlayer(QWidget):
         self._frame_request_id += 1
         request_id = self._frame_request_id
         path = self._path
-        target = self._frame.size()
-        if target.width() < 8 or target.height() < 8:
-            target = self._stack_host.size()
+        target = _preview_target_size(self._frame, self._stack_host)
 
         def work() -> None:
             try:
@@ -303,12 +364,26 @@ class PreviewPlayer(QWidget):
                     return
                 pix = QPixmap(str(frame_path))
                 if pix.isNull():
+                    if request_id == self._frame_request_id:
+                        self._frame_ready.emit(
+                            QPixmap(),
+                            ms,
+                            "Preview error: could not decode frame image",
+                        )
                     return
                 scaled = pix.scaled(
                     target,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
+                if scaled.isNull():
+                    if request_id == self._frame_request_id:
+                        self._frame_ready.emit(
+                            QPixmap(),
+                            ms,
+                            "Preview error: could not scale frame for display",
+                        )
+                    return
                 self._frame_ready.emit(scaled, ms, f"Preview @ {_format_ms_as_timecode(ms)}")
             except Exception as exc:  # noqa: BLE001
                 if request_id == self._frame_request_id:
@@ -319,12 +394,19 @@ class PreviewPlayer(QWidget):
     @Slot(object, int, str)
     def _apply_ffmpeg_frame(self, pixmap: QPixmap, ms: int, status: str) -> None:
         if pixmap.isNull():
+            self._frame.setPixmap(QPixmap())
+            self._frame.setText("Preview unavailable")
             self._status.setText(status)
             return
         self._frame.setPixmap(pixmap)
         self._frame.setText("")
         self._status.setText(status)
         self._update_time_label(ms)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if self._ffmpeg_fallback and self._path:
+            self._schedule_ffmpeg_frame(self._position_ms)
 
     def _update_time_label(self, pos_ms: int) -> None:
         dur = self._duration_ms
@@ -336,4 +418,4 @@ class PreviewPlayer(QWidget):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         if self._ffmpeg_fallback and self._path:
-            self._show_ffmpeg_frame(self._position_ms)
+            self._schedule_ffmpeg_frame(self._position_ms)
