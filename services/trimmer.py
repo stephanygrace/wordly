@@ -73,14 +73,12 @@ def _duration_from_ffmpeg_stderr(stderr: str) -> float:
 
 
 def _ffmpeg_probe_stderr(video_path: Path) -> str:
+    """Read container metadata via ``ffmpeg -i`` only — never decode the full file."""
     cmd = [
         require_ffmpeg(),
         "-hide_banner",
         "-i",
         str(video_path),
-        "-f",
-        "null",
-        "-",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     return proc.stderr
