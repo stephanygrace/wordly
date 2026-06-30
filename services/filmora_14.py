@@ -1,12 +1,12 @@
-"""Filmora 14.2.9 project constants and schema helpers."""
+"""Filmora project constants — targets Wondershare Filmora 15.5.3 (Mac)."""
 
 from __future__ import annotations
 
 FILMORA_PRODUCT = "Wondershare Filmora"
-FILMORA_VERSION = "14.2.9"
-FILMORA_BUILD = "14.2.9.11061"
+FILMORA_VERSION = "15.5.3"
+FILMORA_BUILD = "15.5.3.11417"
 FILMORA_FORMAT = "wfp"
-FILMORA_WSVE_VERSION = 14
+FILMORA_WSVE_VERSION = 15
 
 # Vertical reel defaults used by Wordly.
 DEFAULT_WIDTH = 1080

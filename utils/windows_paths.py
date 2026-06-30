@@ -39,7 +39,11 @@ def filmora_host_note() -> str:
     if "microsoft" in platform.release().lower() or os.environ.get("WSL_DISTRO_NAME"):
         distro = os.environ.get("WSL_DISTRO_NAME", "Ubuntu")
         return (
-            f"Media paths use Windows UNC (\\\\wsl$\\{distro}\\...) so Filmora 14 on "
+            f"Media paths use Windows UNC (\\\\wsl$\\{distro}\\...) so Filmora on "
             "Windows can open files produced in WSL."
         )
-    return "Media paths are absolute paths on this machine."
+    return (
+        "Media paths are absolute Mac paths. "
+        "Open the .wfp from the exports/<name>/ folder in Filmora — "
+        "keep it beside the media/ subfolder."
+    )

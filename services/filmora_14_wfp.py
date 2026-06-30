@@ -489,11 +489,22 @@ def _filmora_path_str(path: Path) -> str:
 
 
 def _filmora_file_url(path: Path) -> str:
-    """Timeline clip paths use a file:/ prefix."""
+    """Return a Filmora file URL for the given path.
+
+    Windows / WSL: ``file:/C:/...`` (two slashes before the drive letter).
+    Mac / Linux native: ``file:///Users/...`` (three slashes — RFC 8089 absolute).
+    """
+    import os as _os
     win = _filmora_path_str(path)
     if win.startswith("file:"):
         return win
-    return "file:/" + win.lstrip("/")
+    # Windows drive letter (e.g. "C:/...") or WSL UNC ("\\\\...")
+    if _os.name == "nt" or (len(win) >= 2 and win[1] == ":") or win.startswith("\\\\"):
+        return "file:/" + win.lstrip("/")
+    # Unix/Mac absolute path: RFC 8089 form is file:///abs/path
+    if win.startswith("/"):
+        return "file://" + win  # produces file:///abs/path
+    return "file:/" + win
 
 
 def _json_safe_media_path(path: str) -> str:
@@ -541,27 +552,42 @@ def _replacement_target_for_old(old_var: str, new_path: str) -> str:
 
 def _sanitize_timeline_filenames(text: str) -> str:
     """
-    Normalize clip filename URLs in timeline.wesproj.
+    Normalize clip filename URLs in timeline.wesproj after path substitution.
 
-    Partial path replacements can leave Windows backslashes in JSON (e.g. \\P in
-    "Piano"), which breaks parsing and makes Filmora show "can't open file".
-    Filmora 14 on Windows expects ``file:/C:/...`` (two slashes), not file:///.
+    Partial substitutions can leave raw backslashes in JSON (e.g. ``\\P`` in
+    "Piano"), which breaks JSON parsing and causes "can't open file" in Filmora.
+
+    URL format rules:
+    - Windows / WSL UNC: ``file:/C:/...`` or ``file:////server/share`` — keep as-is.
+    - Mac / Linux: ``file:///abs/path`` (RFC 8089) — preserve three slashes.
     """
+    import os as _os
+    on_windows = _os.name == "nt"
 
     def repl(match: re.Match[str]) -> str:
         url = match.group(1)
+        # WSL UNC or Windows UNC — never touch backslashes here
         if url.startswith("file:///\\\\") or url.startswith("file://\\\\"):
             return match.group(0)
-        if url.startswith("file:///"):
-            body = url[7:].replace("\\", "/").lstrip("/")
+        # Collapse backslashes left by partial substitution, then re-normalise
+        clean = url.replace("\\", "/")
+        # Extract the path body after the file: scheme
+        if clean.startswith("file:///"):
+            body = clean[8:]  # after "file:///"
+        elif clean.startswith("file://"):
+            body = clean[7:].lstrip("/")
+        elif clean.startswith("file:/"):
+            body = clean[6:].lstrip("/")
+        else:
+            return match.group(0)
+        # Windows drive letter (e.g. "C:/...")
+        if len(body) >= 2 and body[1] == ":":
             return f'"filename":"file:/{body}"'
-        if url.startswith("file://"):
-            body = url[6:].replace("\\", "/").lstrip("/")
+        # Mac/Linux absolute path
+        if on_windows:
+            # Running on Windows but path looks Unix-like — best effort
             return f'"filename":"file:/{body}"'
-        if url.startswith("file:/"):
-            body = url[5:].replace("\\", "/").lstrip("/")
-            return f'"filename":"file:/{body}"'
-        return match.group(0)
+        return f'"filename":"file:///{body}"'
 
     return re.sub(r'"filename":"(file:[^"]+)"', repl, text)
 
