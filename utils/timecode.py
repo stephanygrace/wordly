@@ -55,6 +55,16 @@ def parse_timecode(value: str) -> ParsedTimecode:
     return ParsedTimecode(total_seconds=total)
 
 
+def format_timecode_digits(digits: str) -> str:
+    """Format up to six digits as HH:MM:SS while typing."""
+    clean = re.sub(r"\D", "", digits)[:6]
+    if len(clean) <= 2:
+        return clean
+    if len(clean) <= 4:
+        return f"{clean[:2]}:{clean[2:]}"
+    return f"{clean[:2]}:{clean[2:4]}:{clean[4:]}"
+
+
 def format_timecode(seconds: float) -> str:
     """Format seconds as HH:MM:SS for display and editing."""
     if seconds < 0:
@@ -90,3 +100,22 @@ def validate_segment_times(
         if end > media_duration_s:
             raise ValueError(f"End is after the sermon ends ({dur_label}).")
     return start, end
+
+
+def end_timecode_from_start_offset(
+    start_text: str,
+    offset_s: float,
+    *,
+    media_duration_s: float | None = None,
+) -> str:
+    """Return a formatted end timecode at start + offset, clamped to media duration."""
+    if offset_s <= 0:
+        raise ValueError("Offset must be positive.")
+    start = parse_timecode(start_text).total_seconds
+    end = start + offset_s
+    if media_duration_s is not None and media_duration_s > 0:
+        end = min(end, media_duration_s)
+    validate_range(start, end)
+    if media_duration_s is not None and media_duration_s > 0 and end > media_duration_s:
+        raise ValueError(f"End is after the sermon ends ({format_timecode(media_duration_s)}).")
+    return format_timecode(end)

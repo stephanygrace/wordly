@@ -18,6 +18,7 @@ from services.filmora_14 import FILMORA_BUILD
 from services.filmora_template import TEMPLATE_DIR, template_media_bundle, template_path
 from services.trimmer import ffprobe_duration_seconds, parse_trim_times
 from utils.console_log import log_error, log_info, log_step, log_warn
+from utils.export_name import default_export_project_name
 from utils.paths import EXPORTS, TEMP
 from utils.windows_paths import filmora_media_path
 
@@ -247,8 +248,8 @@ def _sync_clip_paths_to_source_uuid(
 
 
 def _export_stem(project_name: str) -> str:
-    stem = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in project_name.strip())
-    return stem or "wordly-project"
+    stem = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in project_name.strip())
+    return stem or default_export_project_name()
 
 
 @dataclass(frozen=True)

@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
 )
 
 from services.ffmpeg_frame import extract_preview_frame
-from services.trimmer import ffprobe_duration_seconds
 from utils.console_log import log_info, log_warn
 from utils.preview_target import PreviewDimensions, preview_target_dimensions
 from utils.timecode import format_timecode
@@ -140,11 +139,15 @@ class PreviewPlayer(QWidget):
         self._hint.setWordWrap(True)
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(0, 0, 0, 4)
         layout.addWidget(self._stack_host)
+        layout.addSpacing(4)
         layout.addLayout(controls)
         layout.addWidget(self._time_label)
         layout.addWidget(self._slider)
         layout.addWidget(self._status)
+        layout.addSpacing(4)
         layout.addWidget(self._hint)
 
         self._frame_ready.connect(self._apply_ffmpeg_frame)
@@ -175,6 +178,11 @@ class PreviewPlayer(QWidget):
         self._trim_end_ms = 0
         self._apply_slider_range()
 
+    def set_duration_seconds(self, duration_s: float) -> None:
+        if duration_s > 0:
+            self._duration_ms = int(duration_s * 1000)
+            self._apply_slider_range()
+
     def load_file(self, path: Path) -> None:
         path = Path(path)
         if not path.exists():
@@ -187,20 +195,13 @@ class PreviewPlayer(QWidget):
         self._ffmpeg_fallback = False
         self._stack.setCurrentWidget(self._video)
         self._status.setText(f"Loading {path.name}…")
-        try:
-            self._duration_ms = int(ffprobe_duration_seconds(self._path) * 1000)
-        except Exception as exc:  # noqa: BLE001
-            self._status.setText(str(exc))
-            self._frame.setText(str(exc))
-            self._stack.setCurrentWidget(self._frame)
-            log_warn("preview", str(exc))
-            return
+        self._duration_ms = 0
         self._apply_slider_range()
         self._player.setSource(QUrl.fromLocalFile(str(self._path)))
         start = self._trim_start_ms if self._trim_end_ms > self._trim_start_ms else 0
         self._seek_to(start)
         self._status.setText(f"Loaded {path.name}")
-        log_info("preview", f"Loaded {path.name} ({_format_ms_as_timecode(self._duration_ms)})")
+        log_info("preview", f"Loaded {path.name}")
         if _running_on_wsl():
             self._enable_ffmpeg_preview(
                 "WSL preview uses FFmpeg frame scrub — Qt video output is unreliable here."

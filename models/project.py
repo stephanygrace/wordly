@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from utils.export_name import default_export_project_name
+
 
 @dataclass
 class ClipSegment:
@@ -59,5 +61,5 @@ class ProjectState:
     selected_verse: Optional[VerseChoice] = None
     music_choices: list[MusicChoice] = field(default_factory=list)
     selected_music: Optional[MusicChoice] = None
-    project_name: str = "wordly-project"
+    project_name: str = field(default_factory=default_export_project_name)
     wfp_output_path: Optional[Path] = None

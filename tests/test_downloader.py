@@ -4,6 +4,9 @@ import unittest
 
 from services.downloader import (
     _download_status_message,
+    _feed_subprocess_buffer,
+    _progress_from_download_line,
+    _progress_from_log_line,
     _progress_from_postprocessor_hook,
     _progress_from_ytdlp_hook,
 )
@@ -61,6 +64,63 @@ class TestDownloaderProgress(unittest.TestCase):
         self.assertIsNotNone(update)
         _, msg = update  # type: ignore[misc]
         self.assertIn("Merger", msg)
+
+    def test_cli_download_line_with_percent(self) -> None:
+        update = _progress_from_download_line(
+            "[download]  45.2% of ~  500.00MiB at  2.34MiB/s ETA 01:23",
+        )
+        self.assertIsNotNone(update)
+        ratio, msg = update  # type: ignore[misc]
+        self.assertAlmostEqual(ratio, 0.452)
+        self.assertIn("45%", msg)
+        self.assertIn("2.34MiB/s", msg)
+        self.assertIn("ETA 01:23", msg)
+
+    def test_cli_download_line_without_total(self) -> None:
+        update = _progress_from_download_line(
+            "[download]   1.23MiB at  456.78KiB/s",
+        )
+        self.assertIsNotNone(update)
+        ratio, msg = update  # type: ignore[misc]
+        self.assertEqual(ratio, -1.0)
+        self.assertIn("1.23MiB", msg)
+        self.assertIn("total size unknown", msg)
+
+    def test_facebook_log_line(self) -> None:
+        update = _progress_from_log_line(
+            "[facebook] 2331486044046083: Downloading webpage",
+        )
+        self.assertIsNotNone(update)
+        _, msg = update  # type: ignore[misc]
+        self.assertIn("Facebook", msg)
+        self.assertIn("Downloading webpage", msg)
+
+    def test_carriage_return_progress_updates(self) -> None:
+        seen: list[str] = []
+
+        def capture(line: str) -> None:
+            seen.append(line)
+
+        remainder = _feed_subprocess_buffer(
+            "[download]   0.0%\r[download]  12.5%\r[download]  45.2% of 500.00MiB\n",
+            capture,
+        )
+        self.assertEqual(remainder, "")
+        self.assertEqual(len(seen), 3)
+        update = _progress_from_download_line(seen[-1])
+        self.assertIsNotNone(update)
+        ratio, msg = update  # type: ignore[misc]
+        self.assertAlmostEqual(ratio, 0.452)
+        self.assertIn("45%", msg)
+
+    def test_already_downloaded_line(self) -> None:
+        update = _progress_from_download_line(
+            "[download] /tmp/sermon.mp4 has already been downloaded",
+        )
+        self.assertIsNotNone(update)
+        ratio, msg = update  # type: ignore[misc]
+        self.assertEqual(ratio, 1.0)
+        self.assertIn("existing", msg)
 
 
 if __name__ == "__main__":

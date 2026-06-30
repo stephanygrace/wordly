@@ -24,6 +24,7 @@ from services.filmora_14 import (
 from services.filmora_14_wfp import generate_wfp_from_template
 from services.filmora_template import template_available
 from services.trimmer import ffprobe_duration_seconds
+from utils.export_name import default_export_project_name
 from utils.paths import ASSETS, EXPORTS, TEMP
 from utils.windows_paths import filmora_media_path
 
@@ -294,9 +295,9 @@ def generate_wfp(
     TEMP.mkdir(parents=True, exist_ok=True)
     (ASSETS / "filmora_templates").mkdir(parents=True, exist_ok=True)
 
-    stem = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in project.project_name.strip())
+    stem = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in project.project_name.strip())
     if not stem:
-        stem = "wordly-project"
+        stem = default_export_project_name()
     out = output_path or (EXPORTS / f"{stem}.wfp")
     project_guid = _new_id()
     entries = _standalone_entries(project, layers, project_guid)
