@@ -14,14 +14,26 @@ class TestSubprocessWin(unittest.TestCase):
 
     def test_background_creationflags_uses_detached_on_windows(self) -> None:
         import subprocess
+        from contextlib import ExitStack
 
-        with mock.patch.object(os, "name", "nt"):
+        patches = [mock.patch.object(os, "name", "nt")]
+        if not hasattr(subprocess, "DETACHED_PROCESS"):
+            patches.append(
+                mock.patch.object(subprocess, "DETACHED_PROCESS", 0x00000008, create=True)
+            )
+        if not hasattr(subprocess, "CREATE_NO_WINDOW"):
+            patches.append(
+                mock.patch.object(subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True)
+            )
+        with ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
             flags = background_creationflags()
-        expected = 0
-        if hasattr(subprocess, "DETACHED_PROCESS"):
-            expected |= subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
-        if hasattr(subprocess, "CREATE_NO_WINDOW"):
-            expected |= subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+            expected = 0
+            if hasattr(subprocess, "DETACHED_PROCESS"):
+                expected |= subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                expected |= subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
         self.assertEqual(flags, expected)
         self.assertNotEqual(flags, 0)
 
