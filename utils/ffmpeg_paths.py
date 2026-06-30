@@ -2,16 +2,26 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 _FFMPEG_BIN_NAMES = ("ffmpeg.exe", "ffmpeg")
 _FFPROBE_BIN_NAMES = ("ffprobe.exe", "ffprobe")
+_ARIA2C_BIN_NAMES = ("aria2c.exe", "aria2c")
 
 _WINDOWS_CANDIDATE_DIRS: tuple[Path, ...] = (
     Path(r"C:\ffmpeg\bin"),
     Path(r"C:\Program Files\ffmpeg\bin"),
     Path(r"C:\Program Files (x86)\ffmpeg\bin"),
     Path(os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links")),
+)
+
+_MAC_CANDIDATE_DIRS: tuple[Path, ...] = (
+    Path.home() / "bin",
+    Path("/opt/homebrew/bin"),
+    Path("/usr/local/bin"),
+    Path("/opt/homebrew/opt/ffmpeg/bin"),
+    Path("/usr/local/opt/ffmpeg/bin"),
 )
 
 
@@ -53,6 +63,19 @@ def _resolve_bin(names: tuple[str, ...]) -> str | None:
     return None
 
 
+def _scan_mac_dirs(names: tuple[str, ...]) -> str | None:
+    if sys.platform != "darwin":
+        return None
+    for folder in _MAC_CANDIDATE_DIRS:
+        if not folder.is_dir():
+            continue
+        for name in names:
+            candidate = folder / name
+            if candidate.is_file():
+                return str(candidate.resolve())
+    return None
+
+
 def _scan_windows_dirs(names: tuple[str, ...]) -> str | None:
     if os.name != "nt":
         return None
@@ -79,11 +102,36 @@ def _scan_windows_dirs(names: tuple[str, ...]) -> str | None:
 
 
 def find_ffmpeg() -> str | None:
-    return _resolve_bin(_FFMPEG_BIN_NAMES) or _scan_windows_dirs(_FFMPEG_BIN_NAMES)
+    return (
+        _resolve_bin(_FFMPEG_BIN_NAMES)
+        or _scan_mac_dirs(_FFMPEG_BIN_NAMES)
+        or _scan_windows_dirs(_FFMPEG_BIN_NAMES)
+    )
 
 
 def find_ffprobe() -> str | None:
-    return _resolve_bin(_FFPROBE_BIN_NAMES) or _scan_windows_dirs(_FFPROBE_BIN_NAMES)
+    found = (
+        _resolve_bin(_FFPROBE_BIN_NAMES)
+        or _scan_mac_dirs(_FFPROBE_BIN_NAMES)
+        or _scan_windows_dirs(_FFPROBE_BIN_NAMES)
+    )
+    if found:
+        return found
+    ffmpeg = find_ffmpeg()
+    if ffmpeg:
+        sibling = Path(ffmpeg).with_name("ffprobe")
+        if sibling.is_file():
+            return str(sibling.resolve())
+    return None
+
+
+def find_aria2c() -> str | None:
+    """Return the aria2c executable path, or None if not installed."""
+    return (
+        _resolve_bin(_ARIA2C_BIN_NAMES)
+        or _scan_mac_dirs(_ARIA2C_BIN_NAMES)
+        or _scan_windows_dirs(_ARIA2C_BIN_NAMES)
+    )
 
 
 def ffmpeg_bin_dir() -> Path | None:
@@ -120,5 +168,10 @@ def _install_message(tool: str) -> str:
             "  winget install Gyan.FFmpeg\n"
             "  choco install ffmpeg\n"
             "Or download from https://ffmpeg.org/download.html and add the bin folder to PATH."
+        )
+    if sys.platform == "darwin":
+        return (
+            f"{tool} not found. Install FFmpeg and restart Wordly.\n\n"
+            "  brew install ffmpeg"
         )
     return f"{tool} not found on PATH. Install FFmpeg (e.g. sudo apt install ffmpeg)."
