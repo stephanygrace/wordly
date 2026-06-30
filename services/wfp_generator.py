@@ -6,7 +6,7 @@ import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from models.project import MusicChoice, ProjectState, VerseChoice
 from services.filmora_14 import (
@@ -276,6 +276,7 @@ def generate_wfp(
     project: ProjectState,
     *,
     output_path: Optional[Path] = None,
+    progress_cb: Optional[Callable[[float, str], None]] = None,
 ) -> Path:
     """
     Build a Filmora 14.2.9 .wfp project archive.
@@ -285,7 +286,9 @@ def generate_wfp(
     instrumental bed while keeping the native timeline layout.
     """
     if template_available():
-        return generate_wfp_from_template(project, output_path=output_path)
+        return generate_wfp_from_template(
+            project, output_path=output_path, progress_cb=progress_cb
+        )
 
     layers = build_layers(project)
     if not layers:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -9,9 +10,10 @@ import subprocess
 import time
 import uuid
 import zipfile
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 from models.project import ProjectState
 from services.filmora_14 import FILMORA_BUILD
@@ -272,8 +274,16 @@ def _copy_media_file(src: Path, dest_dir: Path, dest_name: str) -> Path:
         raise FileNotFoundError(f"Media file not found: {src}")
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = (dest_dir / dest_name).resolve()
-    if src.resolve() != dest:
-        shutil.copy2(src, dest)
+    src_resolved = src.resolve()
+    if dest.is_file() and dest.stat().st_size == src_resolved.stat().st_size:
+        return dest
+    if src_resolved != dest:
+        try:
+            if dest.exists():
+                dest.unlink()
+            os.link(src_resolved, dest)
+        except OSError:
+            shutil.copy2(src_resolved, dest)
     if dest.stat().st_size <= 0:
         raise ValueError(f"Media file is empty: {dest}")
     return dest
@@ -377,7 +387,7 @@ def _prepare_export_bundle(
 
     readme = bundle_dir / "OPEN_IN_FILMORA.txt"
     readme.write_text(
-        f"Open this project in Filmora 14.2.9:\n\n"
+        f"Open this project in Filmora 15:\n\n"
         f"  {bundle_dir / f'{safe_stem}.wfp'}\n\n"
         f"Keep this folder together — the .wfp and the media/ subfolder must stay "
         f"in the same place.\n",
@@ -398,7 +408,8 @@ def _prepare_export_bundle(
 
 
 def _guid() -> str:
-    return "{" + str(uuid.uuid4()).upper() + "}"
+    """Return a GUID in Filmora's native format: XX-XX-XX-... (16 bytes, uppercase hex)."""
+    return "-".join(f"{b:02X}" for b in uuid.uuid4().bytes)
 
 
 def _media_file_md5(path: Path) -> str:
@@ -468,11 +479,26 @@ def _validate_export_segments(
     )
 
 
-def _safe_duration(path: Path, fallback_s: float) -> float:
+def _safe_duration(path: Path, fallback_s: float, *, known_s: float | None = None) -> float:
+    if known_s is not None and known_s > 0:
+        return known_s
     try:
         return ffprobe_duration_seconds(path)
     except Exception:
         return fallback_s
+
+
+def _media_path_basename(path_str: str) -> str:
+    """Basename for cross-platform media paths (file URLs, UNC, / or \\ separators)."""
+    text = str(path_str or "").strip()
+    if not text:
+        return ""
+    if text.lower().startswith("file:"):
+        text = text.split(":", 1)[-1]
+        while text.startswith("/"):
+            text = text[1:]
+    text = text.replace("\\", "/")
+    return text.rsplit("/", 1)[-1].lower()
 
 
 def _read_json(raw: bytes) -> Any:
@@ -493,19 +519,34 @@ def _filmora_file_url(path: Path) -> str:
     """Return a Filmora file URL for the given path.
 
     Windows / WSL: ``file:/C:/...`` (two slashes before the drive letter).
-    Mac / Linux native: ``file:///Users/...`` (three slashes — RFC 8089 absolute).
+    macOS Filmora 15: ``file://Users/...`` (host-less form saved by the Mac app).
+    Linux: ``file:///abs/path`` (RFC 8089).
     """
     import os as _os
+    import sys as _sys
+
     win = _filmora_path_str(path)
     if win.startswith("file:"):
-        return win
+        return _normalize_mac_filmora_file_url(win)
     # Windows drive letter (e.g. "C:/...") or WSL UNC ("\\\\...")
     if _os.name == "nt" or (len(win) >= 2 and win[1] == ":") or win.startswith("\\\\"):
         return "file:/" + win.lstrip("/")
-    # Unix/Mac absolute path: RFC 8089 form is file:///abs/path
     if win.startswith("/"):
-        return "file://" + win  # produces file:///abs/path
+        if _sys.platform == "darwin":
+            return "file://" + win.lstrip("/")
+        return "file://" + win
     return "file:/" + win
+
+
+def _normalize_mac_filmora_file_url(url: str) -> str:
+    """Filmora Mac stores ``file://Users/...`` not ``file:///Users/...``."""
+    import sys as _sys
+
+    if _sys.platform != "darwin" or not url.startswith("file:"):
+        return url
+    if url.startswith("file:///"):
+        return "file://" + url[8:].lstrip("/")
+    return url
 
 
 def _json_safe_media_path(path: str) -> str:
@@ -588,7 +629,8 @@ def _sanitize_timeline_filenames(text: str) -> str:
         if on_windows:
             # Running on Windows but path looks Unix-like — best effort
             return f'"filename":"file:/{body}"'
-        return f'"filename":"file:///{body}"'
+        body = body.lstrip("/")
+        return f'"filename":"file://{body}"'
 
     return re.sub(r'"filename":"(file:[^"]+)"', repl, text)
 
@@ -782,6 +824,48 @@ def _strip_clip_transitions(clip: dict[str, Any]) -> None:
     clip.pop("preTransition", None)
 
 
+def _transition_duration_tl_units(transition: Any, *, time_scale: int) -> int:
+    if not isinstance(transition, dict):
+        return max(1, time_scale)
+    begin = int(transition.get("tlBegin") or 0)
+    end = int(transition.get("tlEnd") or 0)
+    duration = abs(end - begin)
+    return duration if duration > 0 else max(1, time_scale)
+
+
+def _retime_clip_transitions(
+    clip: dict[str, Any],
+    *,
+    clip_index: int,
+    clip_count: int,
+    time_scale: int,
+) -> None:
+    """Keep template transitions but move them to the retimed clip boundary."""
+    clip_begin = int(clip.get("tlBegin") or 0)
+    clip_end = int(clip.get("tlEnd") or 0)
+    if clip_end <= clip_begin:
+        _strip_clip_transitions(clip)
+        return
+
+    pre = clip.get("preTransition")
+    if isinstance(pre, dict):
+        duration = _transition_duration_tl_units(pre, time_scale=time_scale)
+        begin = clip_begin if clip_index == 0 else clip_begin - (duration // 2)
+        pre["tlBegin"] = begin
+        pre["tlEnd"] = begin + duration
+
+    post = clip.get("postTransition")
+    if isinstance(post, dict):
+        duration = _transition_duration_tl_units(post, time_scale=time_scale)
+        if clip_index < clip_count - 1:
+            begin = clip_end - (duration // 2)
+            post["tlBegin"] = begin
+            post["tlEnd"] = begin + duration
+        else:
+            post["tlBegin"] = max(clip_begin, clip_end - duration)
+            post["tlEnd"] = clip_end
+
+
 def _sync_clip_speed_span(
     clip: dict[str, Any],
     *,
@@ -810,7 +894,6 @@ def _align_extra_segment_slots_from_first(segment_clips: list[dict[str, Any]]) -
         clip = segment_clips[idx]
         replacement = copy.deepcopy(prototype)
         _renumber_timeline_clip_uid(replacement)
-        _strip_clip_transitions(replacement)
         clip.clear()
         clip.update(replacement)
 
@@ -830,7 +913,6 @@ def _ensure_source_segment_clip_count(
     while len(segment_clips) < count:
         new_clip = copy.deepcopy(prototype)
         _renumber_timeline_clip_uid(new_clip)
-        _strip_clip_transitions(new_clip)
         try:
             insert_at = max(clips.index(clip) for clip in segment_clips) + 1
         except ValueError:
@@ -849,6 +931,55 @@ def _dedupe_segment_clip_uids_on_track(segment_clips: list[dict[str, Any]]) -> N
     seen: set[str] = set()
     for clip in segment_clips:
         _assign_unique_nested_uids(clip, seen)
+
+
+FILMORA_CLIP_DISPLAY_NAME_KEY = 50
+
+
+def _segment_clip_display_names(project: ProjectState, count: int) -> list[str]:
+    """Return one Filmora clip label per trimmed segment slot."""
+    names: list[str] = []
+    for i in range(count):
+        if i < len(project.segments) and project.segments[i].label.strip():
+            names.append(project.segments[i].label.strip())
+        else:
+            names.append(f"Clip {i + 1}")
+    return names
+
+
+def _set_clip_display_name(clip: dict[str, Any], name: str) -> None:
+    """Write the label Filmora shows on a timeline clip (userData key 50)."""
+    raw = name.encode("utf-8")
+    entry = {
+        "key": FILMORA_CLIP_DISPLAY_NAME_KEY,
+        "data": base64.b64encode(raw).decode("ascii"),
+        "size": len(raw),
+    }
+    user_data = clip.setdefault("userData", [])
+    for item in user_data:
+        if item.get("key") == FILMORA_CLIP_DISPLAY_NAME_KEY:
+            item.update(entry)
+            return
+    user_data.append(entry)
+
+
+def _name_source_segment_clips(
+    segment_clips: list[dict[str, Any]],
+    *,
+    project: ProjectState,
+) -> None:
+    for clip, name in zip(
+        segment_clips, _segment_clip_display_names(project, len(segment_clips))
+    ):
+        _set_clip_display_name(clip, name)
+
+
+def _music_display_name(project: ProjectState, audio_path: Path | None) -> str:
+    if project.selected_music and project.selected_music.title.strip():
+        return project.selected_music.title.strip()
+    if audio_path is not None:
+        return audio_path.stem
+    return "Instrumental"
 
 
 def _is_cover_clip(clip: dict[str, Any]) -> bool:
@@ -879,26 +1010,24 @@ def _detect_timeline_time_scale(data: dict[str, Any]) -> int:
     """
     Timeline clip fields use either microseconds (1e6/s) or 100 ns units (1e7/s).
 
-    New sermon-highlights exports keep resources in µs but clip trims in 100 ns.
+    Filmora 15 Mac sermon projects store clip in/out and timeline spans in 100 ns
+    when values reach billions (e.g. ``46275896334`` for ~77 min into a sermon).
     """
-    res_len = 0
+    max_units = 0
     for res in data.get("resources", []):
-        if _VIDEO_FILE_RE.search(str(res.get("filename", "") or "")):
-            res_len = max(res_len, int(res.get("mediaLength") or 0))
-            break
+        max_units = max(max_units, int(res.get("mediaLength") or 0))
     for timeline_info in data.get("timelineInfos", []):
         for track in timeline_info.get("trackInfos", []):
             for clip in track.get("clipList") or []:
-                if not _VIDEO_FILE_RE.search(str(clip.get("filename", "") or "")):
-                    continue
-                out_pt = int(clip.get("outPoint") or 0)
-                span = max(
-                    0,
-                    int(clip.get("tlEnd") or 0) - int(clip.get("tlBegin") or 0),
+                max_units = max(
+                    max_units,
+                    int(clip.get("inPoint") or 0),
+                    int(clip.get("outPoint") or 0),
+                    int(clip.get("tlBegin") or 0),
+                    int(clip.get("tlEnd") or 0),
                 )
-                if span > 0 and res_len > out_pt * 8:
-                    return 10_000_000
-                return 1_000_000
+    if max_units >= 1_000_000_000:
+        return 10_000_000
     return 1_000_000
 
 
@@ -986,7 +1115,12 @@ def _apply_source_segment_clips(
             clip["outPoint"] = scaled_source_end
             clip["tlBegin"] = _to_timeline_units(in_pt, time_scale)
             clip["tlEnd"] = _to_timeline_units(out_pt, time_scale)
-            _strip_clip_transitions(clip)
+            _retime_clip_transitions(
+                clip,
+                clip_index=idx,
+                clip_count=min(len(clips), len(windows)),
+                time_scale=time_scale,
+            )
             dur_scaled = int(clip["tlEnd"]) - int(clip["tlBegin"])
             _sync_clip_speed_span(clip, duration_tl_units=dur_scaled, time_scale=time_scale)
         return _to_timeline_units(windows[-1][1], time_scale)
@@ -1004,7 +1138,12 @@ def _apply_source_segment_clips(
         clip["outPoint"] = out_scaled
         clip["tlBegin"] = timeline_pos
         clip["tlEnd"] = timeline_pos + dur_scaled
-        _strip_clip_transitions(clip)
+        _retime_clip_transitions(
+            clip,
+            clip_index=idx,
+            clip_count=min(len(clips), len(windows)),
+            time_scale=time_scale,
+        )
         _sync_clip_speed_span(clip, duration_tl_units=dur_scaled, time_scale=time_scale)
         timeline_pos += dur_scaled
     return timeline_pos
@@ -1078,6 +1217,7 @@ def _patch_timeline_track_layout(
                     source_duration_us=source_duration_us,
                     trim_style=trim_style,
                 )
+                _name_source_segment_clips(segment_clips, project=project)
                 _dedupe_segment_clip_uids_on_track(segment_clips)
 
             for clip in clips:
@@ -1198,8 +1338,17 @@ def _patch_timeline_segments_only(
                     trim_style=trim_style,
                     time_scale=time_scale,
                 )
+                _name_source_segment_clips(segment_clips, project=project)
                 _dedupe_segment_clip_uids_on_track(segment_clips)
                 timeline_end = max(timeline_end, track_end)
+    if timeline_end > 0:
+        verse_timeline_id = _verse_subtimeline_id(data)
+        if verse_timeline_id:
+            _sync_compound_verse_clips(
+                data,
+                verse_timeline_id=verse_timeline_id,
+                duration_tl=timeline_end,
+            )
     return timeline_end
 
 
@@ -1228,6 +1377,7 @@ def _patch_timeline_music_clips(
     audio_path: Path | None,
     audio_duration_us: int,
     highlight_duration_us: int,
+    display_name: str | None = None,
 ) -> None:
     """Point timeline music clips at the exported instrumental.
 
@@ -1254,6 +1404,7 @@ def _patch_timeline_music_clips(
                 if not _is_music_clip(clip) and clip_uuid != audio_uuid:
                     continue
                 clip["filename"] = audio_url
+                _set_clip_display_name(clip, display_name or audio_path.stem)
                 clip["inPoint"] = 0
                 clip["outPoint"] = end_tl
                 if int(clip.get("tlBegin") or 0) == 0:
@@ -1282,20 +1433,36 @@ def _patch_timeline_resources(
         lower = fn.lower()
         if audio_url and _AUDIO_FILE_RE.search(lower):
             res["filename"] = audio_url
-            res["mediaLength"] = audio_duration_us
+            res["mediaLength"] = _filmora_media_length_units(audio_duration_us)
+            _sync_resource_stream_lengths(res, res["mediaLength"])
         elif cover_url and _IMAGE_FILE_RE.search(lower):
             res["filename"] = cover_url
-            res["mediaLength"] = COVER_CLIP_DURATION_US
+            res["mediaLength"] = _filmora_media_length_units(COVER_CLIP_DURATION_US)
+            _sync_resource_stream_lengths(res, res["mediaLength"])
         elif _joined_reel_filename(fn):
             res["filename"] = joined_url
-            res["mediaLength"] = joined_duration_us
+            res["mediaLength"] = _filmora_media_length_units(joined_duration_us)
+            _sync_resource_stream_lengths(res, res["mediaLength"])
         elif _VIDEO_FILE_RE.search(fn):
             res["filename"] = source_url
-            res["mediaLength"] = source_duration_us
+            res["mediaLength"] = _filmora_media_length_units(source_duration_us)
+            _sync_resource_stream_lengths(res, res["mediaLength"])
         elif _IMAGE_FILE_RE.search(lower):
             existing = int(res.get("mediaLength") or 0)
             if existing <= 0 or existing > 60_000_000:
-                res["mediaLength"] = COVER_CLIP_DURATION_US
+                units = _filmora_media_length_units(COVER_CLIP_DURATION_US)
+                res["mediaLength"] = units
+                _sync_resource_stream_lengths(res, units)
+
+
+def _sync_resource_stream_lengths(res: dict[str, Any], media_length_units: int) -> None:
+    """Keep nested streamLength fields aligned with resources[].mediaLength."""
+    for key in ("vidStreamInfo", "audStreamInfo"):
+        streams = res.get(key)
+        if isinstance(streams, list):
+            for stream in streams:
+                if isinstance(stream, dict):
+                    stream["streamLength"] = media_length_units
 
 
 def _apply_replacements_to_extract_dir(extract_dir: Path, replacements: dict[str, str]) -> None:
@@ -1380,13 +1547,63 @@ def _patch_script_buf_verse(script_buf: str, reference: str, body: str) -> str:
         marker = f'"{field}":"'
         if marker not in script_buf:
             continue
-        script_buf = re.sub(
-            rf'"{field}":"(?:\\.|[^"\\])*"',
-            f'"{field}":"{inner_escaped}"',
-            script_buf,
-            count=1,
-        )
+        pattern = rf'"{field}":"(?:\\.|[^"\\])*"'
+
+        def _repl(_match: re.Match[str], *, field_name: str = field) -> str:
+            # Callable replacement — re.sub treats ``\r`` in replacement strings as CR.
+            return f'"{field_name}":"{inner_escaped}"'
+
+        script_buf = re.sub(pattern, _repl, script_buf, count=1)
     return script_buf
+
+
+def _verse_subtimeline_id(data: dict[str, Any]) -> int:
+    timeline_infos: list[dict[str, Any]] = data.get("timelineInfos") or []
+    if len(timeline_infos) < 2:
+        return 0
+    return int(timeline_infos[1].get("timelineId") or 0)
+
+
+def _compound_verse_duration_tl(data: dict[str, Any], *, verse_timeline_id: int) -> int:
+    """Timeline span of main-timeline compound clips that embed the verse sub-timeline."""
+    if not verse_timeline_id:
+        return 0
+    span = 0
+    for timeline_info in data.get("timelineInfos", []):
+        for track in timeline_info.get("trackInfos", []):
+            for clip in track.get("clipList") or []:
+                if int(clip.get("timelineId") or 0) != verse_timeline_id:
+                    continue
+                begin = int(clip.get("tlBegin") or 0)
+                end = int(clip.get("tlEnd") or 0)
+                clip_span = max(0, end - begin)
+                if clip_span <= 0:
+                    clip_span = max(
+                        0,
+                        int(clip.get("outPoint") or 0) - int(clip.get("inPoint") or 0),
+                    )
+                span = max(span, clip_span)
+    return span
+
+
+def _sync_compound_verse_clips(
+    data: dict[str, Any],
+    *,
+    verse_timeline_id: int,
+    duration_tl: int,
+) -> None:
+    """Retime main-timeline compound clips that embed the verse subtitle timeline."""
+    if not verse_timeline_id or duration_tl <= 0:
+        return
+    for timeline_info in data.get("timelineInfos", []):
+        for track in timeline_info.get("trackInfos", []):
+            for clip in track.get("clipList") or []:
+                if int(clip.get("timelineId") or 0) != verse_timeline_id:
+                    continue
+                clip["inPoint"] = 0
+                clip["outPoint"] = duration_tl
+                clip["tlBegin"] = 0
+                clip["tlEnd"] = duration_tl
 
 
 def _apply_verse_script_clip(
@@ -1419,13 +1636,8 @@ def _ensure_verse_script_layer(
     if not verse:
         return
 
-    duration_us = _verse_timeline_duration_us(project, joined_duration_us=joined_duration_us)
-    duration_tl = max(_to_timeline_units(duration_us, time_scale), 33_366)
-
     timeline_infos: list[dict[str, Any]] = data.get("timelineInfos") or []
     if len(timeline_infos) < 2:
-        # sermon-highlights has one compound timeline; injecting a script clip on track 6
-        # or timelineInfos[1] breaks Filmora project load. Verse text is in verse.txt.
         log_info(
             "export",
             "Verse subtitle skipped (template has no subtitle timeline block)",
@@ -1433,6 +1645,22 @@ def _ensure_verse_script_layer(
         return
 
     verse_timeline = timeline_infos[1]
+    verse_timeline_id = int(verse_timeline.get("timelineId") or 0)
+    compound_duration_tl = _compound_verse_duration_tl(
+        data, verse_timeline_id=verse_timeline_id
+    )
+    if compound_duration_tl > 0:
+        duration_tl = compound_duration_tl
+    else:
+        duration_us = _verse_timeline_duration_us(
+            project, joined_duration_us=joined_duration_us
+        )
+        duration_tl = max(_to_timeline_units(duration_us, time_scale), 33_366)
+        _sync_compound_verse_clips(
+            data,
+            verse_timeline_id=verse_timeline_id,
+            duration_tl=duration_tl,
+        )
     tracks: list[dict[str, Any]] = verse_timeline.setdefault("trackInfos", [])
     if not tracks:
         tracks.append({"clipList": []})
@@ -1458,7 +1686,8 @@ def _ensure_verse_script_layer(
 
     log_info(
         "export",
-        f"Verse subtitle layer on timelineInfos[1] ({duration_tl} timeline units)",
+        "Verse text matched to compound clip "
+        f"({duration_tl} timeline units on timelineInfos[1])",
     )
 
 
@@ -1594,6 +1823,7 @@ def _patch_timeline_wesproj(
             audio_path=audio_path,
             audio_duration_us=audio_duration_us,
             highlight_duration_us=highlight_duration_us,
+            display_name=_music_display_name(project, audio_path),
         )
         timeline_duration_us = max(timeline_duration_us, patched_duration)
         if project.selected_verse:
@@ -1660,6 +1890,7 @@ def _repair_timeline_clips_json(
                     source_duration_us=source_duration_us,
                     trim_style=trim_style,
                 )
+                _name_source_segment_clips(segment_clips, project=project)
 
             for clip in clips:
                 in_pt = int(clip.get("inPoint") or 0)
@@ -1738,22 +1969,18 @@ def _patch_project_info(
     cover_path: Path | None = None,
     preserve_project_guid: bool = False,
 ) -> None:
-    now = int(time.time())
     win_out = _filmora_path_str(output_path)
-    old_guid = str(data.get("project_guid", ""))
     if not preserve_project_guid:
         data["project_guid"] = _guid()
-    # Keep the template Backup/*.wfpbundle cover path when preserving the project identity
-    # (sermon-highlights opens reliably with it). Only clear a raw .jpg path.
-    backup_cover = str(data.get("proj_cover_proj_path", "") or "")
-    if not preserve_project_guid:
-        if old_guid and old_guid in backup_cover:
-            data["proj_cover_proj_path"] = ""
-        elif backup_cover.lower().endswith((".jpg", ".jpeg", ".png")):
-            data["proj_cover_proj_path"] = ""
+    # Always clear the template's cover backup path — it belongs to the template's GUID
+    # and will not exist for new exports with a fresh GUID.
+    data["proj_cover_proj_path"] = ""
     data["project_file_name"] = project.project_name
-    data["project_date_create"] = now
-    data["project_date_modify"] = now
+    # IMPORTANT: do NOT overwrite project_date_create / project_date_modify.
+    # Filmora's `project_source` field is a signature that covers these dates;
+    # since we don't recompute `project_source`, changing the dates invalidates
+    # it and Filmora rejects the project with "project not available" (600009).
+    # The template's original dates+source are a matched pair, so we keep them.
     data["project_editor_create_version"] = FILMORA_BUILD
     data["project_editor_modify_version"] = FILMORA_BUILD
     data["project_timeline_duration"] = duration_us
@@ -1845,6 +2072,7 @@ def _patch_medias_info(
                 duration_us=audio_duration_us,
                 replacements=replacements,
             )
+            item["name"] = _music_display_name(project, audio_path)[:80]
         elif media_type == MEDIA_TYPE_IMAGE and cover_path is not None:
             _assign_media_item(
                 item,
@@ -1866,6 +2094,9 @@ def _patch_media_json_files(
     audio_path: Path | None,
     cover_path: Path | None,
     replacements: dict[str, str],
+    source_duration_us: int = 0,
+    joined_duration_us: int = 0,
+    audio_duration_us: int = 0,
 ) -> None:
     id_to_path: dict[str, Path] = {}
     if layout.source_video_id:
@@ -1881,15 +2112,15 @@ def _patch_media_json_files(
 
     duration_by_folder: dict[str, int] = {}
     if layout.source_video_id:
-        duration_by_folder[layout.source_video_id.strip("{}")] = _us(
+        duration_by_folder[layout.source_video_id.strip("{}")] = source_duration_us or _us(
             _safe_duration(source_video_path, 60.0)
         )
     if layout.joined_video_id and layout.joined_video_id != layout.source_video_id:
-        duration_by_folder[layout.joined_video_id.strip("{}")] = _us(
+        duration_by_folder[layout.joined_video_id.strip("{}")] = joined_duration_us or _us(
             _safe_duration(video_path, 60.0)
         )
     if audio_path is not None:
-        audio_us = _us(_safe_duration(audio_path, 180.0))
+        audio_us = audio_duration_us or _us(_safe_duration(audio_path, 180.0))
         for audio_id in layout.audio_ids:
             duration_by_folder[audio_id.strip("{}")] = audio_us
     if cover_path is not None:
@@ -1907,10 +2138,14 @@ def _patch_media_json_files(
         elif payload.get("sourceInfo", {}).get("basicInfo", {}).get("streamType") == 2:
             # Unknown video slot — default to sermon source (segment template).
             new_name = _filmora_path_str(source_video_path)
-            duration_us = duration_us or _us(_safe_duration(source_video_path, 60.0))
+            duration_us = duration_us or source_duration_us or _us(
+                _safe_duration(source_video_path, 60.0)
+            )
         elif audio_path is not None and payload.get("sourceInfo", {}).get("audStreamInfos"):
             new_name = _filmora_path_str(audio_path)
-            duration_us = duration_us or _us(_safe_duration(audio_path, 180.0))
+            duration_us = duration_us or audio_duration_us or _us(
+                _safe_duration(audio_path, 180.0)
+            )
         else:
             continue
 
@@ -1976,7 +2211,12 @@ def generate_wfp_from_template(
     project: ProjectState,
     *,
     output_path: Path | None = None,
+    progress_cb: Optional[Callable[[float, str], None]] = None,
 ) -> Path:
+    def _progress(ratio: float, message: str) -> None:
+        if progress_cb is not None:
+            progress_cb(ratio, message)
+
     template = template_path()
     log_step("export", f"Using Filmora template: {template}")
     if not template.is_file():
@@ -1996,6 +2236,7 @@ def generate_wfp_from_template(
         stem = _export_stem(resolved_out.stem)
         bundle_dir = resolved_out.parent
     log_step("export", f"Building export bundle for {stem!r}")
+    _progress(-1.0, "Copying media into export folder…")
     bundle = _prepare_export_bundle(project, stem=stem, bundle_dir=bundle_dir)
     log_info("export", f"Bundle folder: {bundle.bundle_dir}")
     log_info("export", f"  joined: {bundle.joined.name} ({bundle.joined.stat().st_size // 1024} KiB)")
@@ -2011,8 +2252,12 @@ def generate_wfp_from_template(
     cover_path = bundle.cover
     out = bundle.wfp_path
 
+    known_source_s = project.sermon_duration_s if project.sermon_duration_s > 0 else None
+    _progress(-1.0, "Reading media durations…")
     video_duration_us = _us(_safe_duration(video_path, 60.0))
-    source_duration_us = _us(_safe_duration(source_video_path, 60.0))
+    source_duration_us = _us(
+        _safe_duration(source_video_path, 60.0, known_s=known_source_s)
+    )
     audio_duration_us = _us(_safe_duration(audio_path, 180.0)) if audio_path else 0
     log_info(
         "export",
@@ -2036,6 +2281,7 @@ def generate_wfp_from_template(
     extract_dir = TEMP / f"wfp_build_{int(time.time())}"
     extract_dir.mkdir(parents=True, exist_ok=True)
 
+    _progress(-1.0, "Assembling Filmora project…")
     with zipfile.ZipFile(template) as zf:
         zf.extractall(extract_dir)
 
@@ -2085,6 +2331,9 @@ def generate_wfp_from_template(
         audio_path=audio_path,
         cover_path=cover_path,
         replacements=replacements,
+        source_duration_us=source_duration_us,
+        joined_duration_us=video_duration_us,
+        audio_duration_us=audio_duration_us,
     )
     timeline_trim_style: str | None = None
     if timeline_path.is_file():
@@ -2209,8 +2458,7 @@ def generate_wfp_from_template(
             out,
             timeline_duration_us,
             cover_path=cover_path,
-            preserve_project_guid=timeline_trim_style
-            in ("tl_source_trim", "source_in_out"),
+            preserve_project_guid=False,
         )
         project_info_path.write_bytes(_write_json(project_info))
         log_info("export", f"proj_cover_proj_path cleared: {not project_info.get('proj_cover_proj_path')}")
@@ -2223,6 +2471,7 @@ def generate_wfp_from_template(
         log_info("export", f"Timeline media registry duration: {timeline_duration_us} µs")
 
     out.parent.mkdir(parents=True, exist_ok=True)
+    _progress(-1.0, f"Writing {out.name}…")
     with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for file_path in sorted(extract_dir.rglob("*")):
             if file_path.is_file():
@@ -2261,7 +2510,7 @@ def _validate_video_media_pool_matches_timeline(wfp_path: Path, layout: Template
         if media_json_arc not in zf.namelist():
             return
         media_json = _read_json(zf.read(media_json_arc))
-        pool_file = Path(str(media_json.get("file_name", "")).replace("/", "\\")).name.lower()
+        pool_file = _media_path_basename(str(media_json.get("file_name", "")))
         timeline_id = json.loads(zf.read("ProjectFolder/project_info.json")).get("timeline_mediaId")
         if not timeline_id:
             return
@@ -2274,7 +2523,7 @@ def _validate_video_media_pool_matches_timeline(wfp_path: Path, layout: Template
                 for clip in track.get("clipList") or []:
                     fn = str(clip.get("filename", "") or "")
                     if _VIDEO_FILE_RE.search(fn) and not _IMAGE_FILE_RE.search(fn):
-                        clip_names.add(Path(fn.split("/")[-1]).name.lower())
+                        clip_names.add(_media_path_basename(fn))
         if not clip_names:
             return
         if pool_file not in clip_names and len(clip_names) == 1:

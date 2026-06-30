@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import re
 import unittest
 import zipfile
 from pathlib import Path
@@ -9,8 +11,10 @@ from tempfile import TemporaryDirectory
 
 from models.project import ClipSegment, MusicChoice, ProjectState, VerseChoice
 from services.filmora_14_wfp import (
+    FILMORA_CLIP_DISPLAY_NAME_KEY,
     _detect_timeline_time_scale,
     _detect_timeline_trim_style,
+    _filmora_file_url,
     _filmora_media_length_units,
     _patch_timeline_segments_only,
     _patch_timeline_music_clips,
@@ -27,8 +31,12 @@ from services.filmora_14_wfp import (
     TemplateLayout,
     _STATIC_PATH_MARKERS,
     _filmora_path_str,
+    _media_path_basename,
     _patch_medias_info,
     _patch_timeline_wesproj,
+    _ensure_verse_script_layer,
+    _compound_verse_duration_tl,
+    _patch_script_buf_verse,
     _register_replacement,
     _replace_paths_in_text,
     _patch_timeline_track_layout,
@@ -57,6 +65,13 @@ def _file_md5(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _clip_display_name(clip: dict) -> str:
+    for item in clip.get("userData") or []:
+        if item.get("key") == FILMORA_CLIP_DISPLAY_NAME_KEY:
+            return base64.b64decode(item["data"]).decode("utf-8").split("\x00")[0]
+    return ""
 
 
 class TestFilmoraPathPatching(unittest.TestCase):
@@ -121,6 +136,11 @@ class TestFilmoraPathPatching(unittest.TestCase):
                     "media_type": 8,
                     "name": "Facebook_1",
                 },
+                TEMPLATE_AUDIO_ID: {
+                    "download_url": "/tmp/template_music.mp3",
+                    "media_type": 4,
+                    "name": "Template Song",
+                },
             }
         }
         with TemporaryDirectory() as tmp:
@@ -129,18 +149,24 @@ class TestFilmoraPathPatching(unittest.TestCase):
             joined.write_bytes(b"\x00")
             sermon = root / "sermon.mp4"
             sermon.write_bytes(b"\x00")
-            project = ProjectState(sermon_path=sermon, project_name="demo")
+            audio = root / "downloaded.m4a"
+            audio.write_bytes(b"\x02")
+            project = ProjectState(
+                sermon_path=sermon,
+                project_name="demo",
+                selected_music=MusicChoice("Downloaded Piano", local_path=audio),
+            )
             replacements = _patch_medias_info(
                 data,
                 project,
                 _legacy_layout(),
                 video_path=joined,
                 source_video_path=joined,
-                audio_path=None,
+                audio_path=audio,
                 cover_path=None,
                 video_duration_us=60_000_000,
                 source_duration_us=60_000_000,
-                audio_duration_us=0,
+                audio_duration_us=180_000_000,
             )
             self.assertNotEqual(
                 data["media_items"][TEMPLATE_SOURCE_VIDEO_ID]["download_url"],
@@ -148,6 +174,8 @@ class TestFilmoraPathPatching(unittest.TestCase):
             )
             self.assertIn(old_source, replacements)
             self.assertIn("joined.mp4", data["media_items"][TEMPLATE_SOURCE_VIDEO_ID]["download_url"])
+            self.assertEqual(data["media_items"][TEMPLATE_AUDIO_ID]["name"], "Downloaded Piano")
+            self.assertIn("downloaded.m4a", data["media_items"][TEMPLATE_AUDIO_ID]["download_url"])
 
 
 class TestPatchTimelineResources(unittest.TestCase):
@@ -175,6 +203,8 @@ class TestPatchTimelineResources(unittest.TestCase):
         self.assertIn("source_sermon.mp4", data["resources"][0]["filename"])
         self.assertIn("cover.jpg", data["resources"][1]["filename"])
         self.assertIn("bed.mp3", data["resources"][2]["filename"])
+        self.assertEqual(data["resources"][0]["mediaLength"], 36_000_000_000)
+        self.assertEqual(data["resources"][2]["mediaLength"], 1_800_000_000)
 
 
 class TestSanitizeTimelineFilenames(unittest.TestCase):
@@ -183,6 +213,27 @@ class TestSanitizeTimelineFilenames(unittest.TestCase):
         fixed = _sanitize_timeline_filenames(raw)
         self.assertIn("file:/C:/wordly/clips/joined.mp4", fixed)
         self.assertNotIn("file:///", fixed)
+
+    def test_normalizes_mac_triple_slash_on_darwin(self) -> None:
+        import sys
+
+        if sys.platform != "darwin":
+            self.skipTest("macOS Filmora URL form")
+        raw = '{"filename":"file:///Users/stelle/clips/joined.mp4"}'
+        fixed = _sanitize_timeline_filenames(raw)
+        self.assertIn('"filename":"file://Users/stelle/clips/joined.mp4"', fixed)
+        self.assertNotIn("file:///", fixed)
+
+    def test_filmora_file_url_mac_format(self) -> None:
+        import sys
+
+        if sys.platform != "darwin":
+            self.skipTest("macOS Filmora URL form")
+        url = _filmora_file_url(Path("/Users/stelle/exports/demo/media/source_sermon.mp4"))
+        self.assertEqual(
+            url,
+            "file://Users/stelle/exports/demo/media/source_sermon.mp4",
+        )
 
     def test_fixes_backslashes_that_break_json(self) -> None:
         broken = (
@@ -238,6 +289,20 @@ class TestExportValidation(unittest.TestCase):
                 source_duration_us=180_000_000,
             )
         self.assertIn("joined highlights", str(ctx.exception))
+
+
+class TestMediaPathBasename(unittest.TestCase):
+    def test_mac_absolute_path(self) -> None:
+        path = "/Users/stelle/Projects/wordly/exports/06.28.26/media/source_sermon.mp4"
+        self.assertEqual(_media_path_basename(path), "source_sermon.mp4")
+
+    def test_file_url(self) -> None:
+        url = "file:///Users/stelle/Projects/wordly/exports/06.28.26/media/source_sermon.mp4"
+        self.assertEqual(_media_path_basename(url), "source_sermon.mp4")
+
+    def test_wsl_unc_path(self) -> None:
+        unc = r"\\wsl$\Ubuntu\home\stelle\exports\06.28.26\media\source_sermon.mp4"
+        self.assertEqual(_media_path_basename(unc), "source_sermon.mp4")
 
 
 class TestTimelineTrimStyle(unittest.TestCase):
@@ -309,6 +374,17 @@ class TestTimelineTrimStyle(unittest.TestCase):
         self.assertEqual(_detect_timeline_trim_style(data), "source_in_out")
         self.assertEqual(_detect_timeline_time_scale(data), 10_000_000)
 
+    def test_sermon_template_uses_100ns_scale(self) -> None:
+        template = Path(__file__).resolve().parents[1] / "assets/filmora_templates/sermon-highlights.wfp"
+        if not template.is_file():
+            self.skipTest("sermon-highlights template missing")
+        with zipfile.ZipFile(template) as zf:
+            pi = json.loads(zf.read("ProjectFolder/project_info.json"))
+            tl = json.loads(
+                zf.read(f'ProjectFolder/Medias/{pi["timeline_mediaId"]}/timeline.wesproj')
+            )
+        self.assertEqual(_detect_timeline_time_scale(tl), 10_000_000)
+
 
 class TestPatchTimelineMusicClips(unittest.TestCase):
     def test_points_music_clip_at_exported_instrumental(self) -> None:
@@ -370,10 +446,12 @@ class TestPatchTimelineMusicClips(unittest.TestCase):
             audio_path=audio,
             audio_duration_us=180_000_000,
             highlight_duration_us=60_000_000,
+            display_name="Downloaded Piano",
         )
         clips = data["timelineInfos"][0]["trackInfos"][0]["clipList"]
         music = clips[1]
         self.assertIn("instrumental.mp3", music["filename"])
+        self.assertEqual(_clip_display_name(music), "Downloaded Piano")
         self.assertEqual(music["outPoint"], 600_000_000)
         self.assertEqual(music["tlEnd"], 600_000_000)
 
@@ -476,6 +554,163 @@ class TestPatchTimelineSegmentsOnly(unittest.TestCase):
         self.assertEqual(clips[1]["tlEnd"], 3_180_000_000)
         self.assertEqual(clips[1]["inPoint"], 6_000_000_000)
         self.assertEqual(clips[1]["outPoint"], 8_580_000_000)
+
+    def test_names_segment_clips_clip_1_clip_2(self) -> None:
+        data = {
+            "resources": [
+                {"filename": "file:/C:/old/video.mp4", "mediaLength": 5_677_286_000}
+            ],
+            "timelineInfos": [
+                {
+                    "trackInfos": [
+                        {
+                            "clipList": [
+                                {
+                                    "filename": "file:/C:/old/video.mp4",
+                                    "inPoint": 0,
+                                    "outPoint": 119_452_667,
+                                    "tlBegin": 0,
+                                    "tlEnd": 119_452_667,
+                                    "type": 2,
+                                },
+                                {
+                                    "filename": "file:/C:/old/video.mp4",
+                                    "inPoint": 0,
+                                    "outPoint": 128_128_000,
+                                    "tlBegin": 119_452_667,
+                                    "tlEnd": 247_580_667,
+                                    "type": 2,
+                                },
+                            ]
+                        }
+                    ]
+                }
+            ],
+        }
+        project = ProjectState(
+            segments=[
+                ClipSegment("01:30:00", "01:31:00"),
+                ClipSegment("00:10:00", "00:14:18"),
+            ],
+        )
+        _patch_timeline_segments_only(
+            data,
+            project=project,
+            source_url="file:/C:/wordly/source_sermon.mp4",
+            source_duration_us=5_677_286_000,
+        )
+        clips = data["timelineInfos"][0]["trackInfos"][0]["clipList"]
+        self.assertEqual(_clip_display_name(clips[0]), "Clip 1")
+        self.assertEqual(_clip_display_name(clips[1]), "Clip 2")
+
+    def test_uses_segment_label_when_set(self) -> None:
+        data = {
+            "resources": [
+                {"filename": "file:/C:/old/video.mp4", "mediaLength": 5_677_286_000}
+            ],
+            "timelineInfos": [
+                {
+                    "trackInfos": [
+                        {
+                            "clipList": [
+                                {
+                                    "filename": "file:/C:/old/video.mp4",
+                                    "inPoint": 0,
+                                    "outPoint": 119_452_667,
+                                    "tlBegin": 0,
+                                    "tlEnd": 119_452_667,
+                                    "type": 2,
+                                },
+                                {
+                                    "filename": "file:/C:/old/video.mp4",
+                                    "inPoint": 0,
+                                    "outPoint": 128_128_000,
+                                    "tlBegin": 119_452_667,
+                                    "tlEnd": 247_580_667,
+                                    "type": 2,
+                                },
+                            ]
+                        }
+                    ]
+                }
+            ],
+        }
+        project = ProjectState(
+            segments=[
+                ClipSegment("01:30:00", "01:31:00", label="Opening"),
+                ClipSegment("00:10:00", "00:14:18"),
+            ],
+        )
+        _patch_timeline_segments_only(
+            data,
+            project=project,
+            source_url="file:/C:/wordly/source_sermon.mp4",
+            source_duration_us=5_677_286_000,
+        )
+        clips = data["timelineInfos"][0]["trackInfos"][0]["clipList"]
+        self.assertEqual(_clip_display_name(clips[0]), "Opening")
+        self.assertEqual(_clip_display_name(clips[1]), "Clip 2")
+
+    def test_retimes_template_dissolve_transitions(self) -> None:
+        data = {
+            "resources": [
+                {"filename": "file:/C:/old/video.mp4", "mediaLength": 5_677_286_000}
+            ],
+            "timelineInfos": [
+                {
+                    "trackInfos": [
+                        {
+                            "clipList": [
+                                {
+                                    "filename": "file:/C:/old/video.mp4",
+                                    "inPoint": 0,
+                                    "outPoint": 119_452_667,
+                                    "tlBegin": 0,
+                                    "tlEnd": 119_452_667,
+                                    "type": 2,
+                                    "postTransition": {
+                                        "display": "Dissolve",
+                                        "tlBegin": 114_452_667,
+                                        "tlEnd": 124_452_667,
+                                    },
+                                },
+                                {
+                                    "filename": "file:/C:/old/video.mp4",
+                                    "inPoint": 0,
+                                    "outPoint": 128_128_000,
+                                    "tlBegin": 119_452_667,
+                                    "tlEnd": 247_580_667,
+                                    "type": 2,
+                                    "postTransition": {
+                                        "display": "Dissolve",
+                                        "tlBegin": 237_580_667,
+                                        "tlEnd": 247_580_667,
+                                    },
+                                },
+                            ]
+                        }
+                    ]
+                }
+            ],
+        }
+        project = ProjectState(
+            segments=[
+                ClipSegment("01:30:00", "01:31:00"),
+                ClipSegment("00:10:00", "00:14:18"),
+            ],
+        )
+        _patch_timeline_segments_only(
+            data,
+            project=project,
+            source_url="file:/C:/wordly/source_sermon.mp4",
+            source_duration_us=5_677_286_000,
+        )
+        clips = data["timelineInfos"][0]["trackInfos"][0]["clipList"]
+        self.assertEqual(clips[0]["postTransition"]["display"], "Dissolve")
+        self.assertEqual(clips[0]["postTransition"]["tlBegin"], 595_000_000)
+        self.assertEqual(clips[0]["postTransition"]["tlEnd"], 605_000_000)
+        self.assertEqual(clips[1]["postTransition"]["tlBegin"], 3_170_000_000)
+        self.assertEqual(clips[1]["postTransition"]["tlEnd"], 3_180_000_000)
 
     def test_dedupes_shared_effect_uids_between_template_slots(self) -> None:
         data = {
@@ -773,6 +1008,152 @@ class TestPatchTimelineSegmentsOnly(unittest.TestCase):
                 continue
             self.assertAlmostEqual(float(speed["offsetEnd"]), span / 10_000_000)
 
+    def test_retimes_compound_verse_clip_to_highlight_span(self) -> None:
+        data = {
+            "timelineInfos": [
+                {
+                    "trackInfos": [
+                        {
+                            "clipList": [
+                                {
+                                    "filename": "file:/C:/old/video.mp4",
+                                    "inPoint": 0,
+                                    "outPoint": 999,
+                                    "tlBegin": 0,
+                                    "tlEnd": 999,
+                                    "type": 2,
+                                },
+                                {
+                                    "filename": "file:/C:/old/video.mp4",
+                                    "inPoint": 0,
+                                    "outPoint": 999,
+                                    "tlBegin": 999,
+                                    "tlEnd": 1998,
+                                    "type": 2,
+                                },
+                            ]
+                        },
+                        {
+                            "clipList": [
+                                {
+                                    "inPoint": 0,
+                                    "outPoint": 5000,
+                                    "tlBegin": 0,
+                                    "tlEnd": 5000,
+                                    "timelineId": 17,
+                                    "type": 7,
+                                }
+                            ]
+                        },
+                    ]
+                },
+                {"timelineId": 17, "trackInfos": [{"clipList": []}]},
+            ],
+        }
+        project = ProjectState(
+            segments=[
+                ClipSegment("00:01:00", "00:03:40"),
+                ClipSegment("00:10:00", "00:14:18"),
+            ]
+        )
+        timeline_end = _patch_timeline_segments_only(
+            data,
+            project=project,
+            source_url="file:/C:/wordly/source_sermon.mp4",
+            source_duration_us=3_600_000_000,
+        )
+        compound = data["timelineInfos"][0]["trackInfos"][1]["clipList"][0]
+        self.assertGreater(timeline_end, 0)
+        self.assertEqual(int(compound["tlEnd"]), timeline_end)
+        self.assertEqual(
+            _compound_verse_duration_tl(data, verse_timeline_id=17),
+            timeline_end,
+        )
+
+
+class TestPatchScriptBufVerse(unittest.TestCase):
+    def test_keeps_script_buf_valid_json_with_crlf_and_quotes(self) -> None:
+        template_wfp = (
+            Path(__file__).resolve().parents[1]
+            / "assets"
+            / "filmora_templates"
+            / "sermon-highlights.wfp"
+        )
+        if not template_wfp.is_file():
+            self.skipTest("sermon-highlights template missing")
+
+        with zipfile.ZipFile(template_wfp) as zf:
+            timeline_id = json.loads(zf.read("ProjectFolder/project_info.json"))[
+                "timeline_mediaId"
+            ]
+            script_buf = json.loads(
+                zf.read(f"ProjectFolder/Medias/{timeline_id}/timeline.wesproj")
+            )["timelineInfos"][1]["trackInfos"][0]["clipList"][0]["scriptBuf"]
+
+        patched = _patch_script_buf_verse(
+            script_buf,
+            "Psalm 19:7–8",
+            '"The law of the Lord is perfect, refreshing the soul."',
+        )
+        parsed = json.loads(patched)
+        self.assertIn("Psalm 19:7–8", parsed["Text"])
+        self.assertIn("The law of the Lord is perfect", parsed["Text"])
+
+
+class TestVerseCompoundTextSync(unittest.TestCase):
+    def test_inner_text_matches_compound_clip_duration(self) -> None:
+        data = {
+            "timelineInfos": [
+                {
+                    "trackInfos": [
+                        {
+                            "clipList": [
+                                {
+                                    "inPoint": 0,
+                                    "outPoint": 2_000_000_000,
+                                    "tlBegin": 0,
+                                    "tlEnd": 2_000_000_000,
+                                    "timelineId": 17,
+                                    "type": 7,
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "timelineId": 17,
+                    "trackInfos": [
+                        {
+                            "clipList": [
+                                {
+                                    "inPoint": 0,
+                                    "outPoint": 1,
+                                    "tlBegin": 0,
+                                    "tlEnd": 1,
+                                    "type": 4,
+                                    "scriptBuf": '{"Text":"placeholder","CharData":"placeholder"}',
+                                }
+                            ]
+                        }
+                    ],
+                },
+            ],
+        }
+        project = ProjectState(
+            segments=[ClipSegment("00:01:00", "00:03:40")],
+            selected_verse=VerseChoice("John 3:16", "For God so loved the world."),
+        )
+        _ensure_verse_script_layer(
+            data,
+            project=project,
+            joined_duration_us=160_000_000,
+            time_scale=10_000_000,
+        )
+        compound = data["timelineInfos"][0]["trackInfos"][0]["clipList"][0]
+        inner = data["timelineInfos"][1]["trackInfos"][0]["clipList"][0]
+        self.assertEqual(int(inner["tlEnd"]), int(compound["tlEnd"]))
+        self.assertIn("John 3:16", inner["scriptBuf"])
+
 
 class TestPatchTimelineTrackLayout(unittest.TestCase):
     def test_tl_source_trim_keeps_in_at_zero(self) -> None:
@@ -976,7 +1357,9 @@ class TestGenerateWfpFromTemplate(unittest.TestCase):
             with patch("services.filmora_14_wfp.template_path", return_value=template_wfp):
                 with patch(
                     "services.filmora_14_wfp._safe_duration",
-                    side_effect=lambda path, default: 3600.0 if "sermon" in path.name else 275.0,
+                    side_effect=lambda path, default, **_: 3600.0
+                    if "sermon" in path.name
+                    else 275.0,
                 ):
                     project = ProjectState(
                         project_name="trim-style-test",
@@ -1010,7 +1393,7 @@ class TestGenerateWfpFromTemplate(unittest.TestCase):
                 self.assertGreater(first_seg["tlEnd"], 0)
                 self.assertGreater(project_info["project_timeline_duration"], 0)
 
-    def test_sermon_highlights_export_keeps_single_timeline_with_verse(self) -> None:
+    def test_sermon_highlights_export_patches_verse_text_layer(self) -> None:
         template_wfp = (
             Path(__file__).resolve().parents[1]
             / "assets"
@@ -1031,7 +1414,9 @@ class TestGenerateWfpFromTemplate(unittest.TestCase):
             with patch("services.filmora_14_wfp.template_path", return_value=template_wfp):
                 with patch(
                     "services.filmora_14_wfp._safe_duration",
-                    side_effect=lambda path, default: 3600.0 if "sermon" in path.name else 275.0,
+                    side_effect=lambda path, default, **_: 3600.0
+                    if "sermon" in path.name
+                    else 275.0,
                 ):
                     project = ProjectState(
                         project_name="verse-layer-test",
@@ -1052,7 +1437,7 @@ class TestGenerateWfpFromTemplate(unittest.TestCase):
                 timeline = json.loads(
                     zf.read(f"ProjectFolder/Medias/{timeline_id}/timeline.wesproj")
                 )
-                self.assertEqual(len(timeline["timelineInfos"]), 1)
+                self.assertGreaterEqual(len(timeline["timelineInfos"]), 2)
                 segment_clips = [
                     clip
                     for track in timeline["timelineInfos"][0]["trackInfos"]
@@ -1061,8 +1446,27 @@ class TestGenerateWfpFromTemplate(unittest.TestCase):
                     and int(clip.get("inPoint") or 0) > 0
                 ]
                 self.assertGreaterEqual(len(segment_clips), 2)
-                for clip in segment_clips:
-                    self.assertIsNone(clip.get("postTransition"))
+
+                verse_clip = timeline["timelineInfos"][1]["trackInfos"][0]["clipList"][0]
+                script_buf = str(verse_clip.get("scriptBuf") or "")
+                text_match = re.search(r'"Text":"([^"]*)"', script_buf)
+                self.assertIsNotNone(text_match)
+                self.assertIn("John 3:16", text_match.group(1))
+                self.assertIn("For God so loved the world.", text_match.group(1))
+                inner_end = int(verse_clip.get("tlEnd") or 0)
+
+                compound_clips = [
+                    clip
+                    for track in timeline["timelineInfos"][0]["trackInfos"]
+                    for clip in track.get("clipList") or []
+                    if int(clip.get("timelineId") or 0) == int(
+                        timeline["timelineInfos"][1].get("timelineId") or 0
+                    )
+                ]
+                self.assertTrue(compound_clips)
+                for compound in compound_clips:
+                    self.assertEqual(int(compound.get("tlEnd") or 0), inner_end)
+
                 manifest = json.loads(
                     (root / "wordly_manifest.json").read_text(encoding="utf-8")
                 )
