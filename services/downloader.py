@@ -5,7 +5,7 @@ from typing import Callable, Optional
 
 ShouldCancel = Callable[[], bool]
 
-from utils.ffmpeg_paths import ffmpeg_bin_dir
+from utils.ffmpeg_paths import ffmpeg_bin_dir, find_aria2c
 from utils.paths import DOWNLOADS
 
 
@@ -157,6 +157,8 @@ def download_facebook_video(
 
     _emit(-1.0, "Preparing download…")
 
+    aria2c_path = find_aria2c()
+
     ydl_opts: dict = {
         "format": "bv*+ba/b",
         "merge_output_format": "mp4",
@@ -171,9 +173,32 @@ def download_facebook_video(
         "fragment_retries": 10,
         "concurrent_fragment_downloads": max(1, int(concurrent_fragments)),
         "http_chunk_size": 10 * 1024 * 1024,
+        # Skip re-downloading if the merged output already exists.
+        "nooverwrites": True,
+        # Suppress side-car files that waste I/O.
+        "writethumbnail": False,
+        "writeinfojson": False,
+        "writedescription": False,
+        "writesubtitles": False,
+        "writeautomaticsub": False,
     }
 
-    _emit(-1.0, f"Using yt-dlp with {ydl_opts['concurrent_fragment_downloads']} concurrent fragments…")
+    if aria2c_path:
+        # Use aria2c for plain HTTP/S streams; yt-dlp still handles DASH/HLS
+        # fragment downloads itself via concurrent_fragment_downloads above.
+        ydl_opts["external_downloader"] = {"default": aria2c_path}
+        ydl_opts["external_downloader_args"] = {
+            "aria2c": [
+                "-x16",
+                "-s16",
+                "--min-split-size=1M",
+                "--console-log-level=warn",
+                "--summary-interval=0",
+            ]
+        }
+        _emit(-1.0, f"Using aria2c + yt-dlp with {ydl_opts['concurrent_fragment_downloads']} concurrent fragments…")
+    else:
+        _emit(-1.0, f"Using yt-dlp with {ydl_opts['concurrent_fragment_downloads']} concurrent fragments…")
 
     bin_dir = ffmpeg_bin_dir()
     if bin_dir:
@@ -185,7 +210,7 @@ def download_facebook_video(
             ydl_opts["cookiefile"] = str(cf.resolve())
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        _emit(-1.0, "Fetching video info from Facebook (this can take 10–30s)…")
+        _emit(-1.0, "Fetching video info from Facebook…")
         info = ydl.extract_info(url, download=True)
 
         path: Path | None = None
