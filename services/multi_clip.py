@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import shutil
 import subprocess
-import tempfile
 import threading
 import time
 from collections import deque
@@ -13,7 +11,7 @@ from models.project import ClipSegment
 from services.trimmer import ffprobe_has_audio, parse_trim_times
 from utils.ffmpeg_paths import require_ffmpeg
 from utils.ffmpeg_progress import parse_ffmpeg_progress_seconds
-from utils.paths import CLIPS, TEMP
+from utils.paths import CLIPS
 from utils.subprocess_win import background_creationflags
 
 ProgressCallback = Callable[[float, str], None]
@@ -189,95 +187,47 @@ def export_segment_clip(
     return output_path.resolve()
 
 
-def concat_clips(
-    clip_paths: list[Path],
-    output_path: Path,
-    *,
-    progress_cb: Optional[ProgressCallback] = None,
-    should_cancel: Optional[ShouldCancel] = None,
-) -> Path:
-    if not clip_paths:
-        raise ValueError("No clips to join.")
-    if len(clip_paths) == 1:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(clip_paths[0], output_path)
-        if progress_cb:
-            progress_cb(1.0, "Joined highlight reel ready")
-        return output_path.resolve()
-
-    TEMP.mkdir(parents=True, exist_ok=True)
-    list_file = TEMP / f"concat_{int(time.time())}.txt"
-    lines = [f"file '{p.resolve().as_posix()}'" for p in clip_paths]
-    list_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        _ffmpeg(),
-        "-hide_banner",
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(list_file),
-        "-c",
-        "copy",
-        str(output_path),
-    ]
-    _run_ffmpeg(
-        cmd,
-        total_duration_s=1.0,
-        progress_cb=progress_cb,
-        should_cancel=should_cancel,
-        status="Joining highlight clips…",
-    )
-    if progress_cb:
-        progress_cb(1.0, "Joined highlight reel ready")
-    return output_path.resolve()
-
-
-def trim_and_join_segments(
+def export_clips(
     sermon_path: Path,
     segments: list[ClipSegment],
+    output_dir: Path,
     *,
-    output_path: Optional[Path] = None,
     progress_cb: Optional[ProgressCallback] = None,
     should_cancel: Optional[ShouldCancel] = None,
-) -> Path:
+) -> list[Path]:
+    """Export each segment as an individual clip named Clip001.mp4, Clip002.mp4, …
+
+    Returns the list of exported clip paths in segment order.
+    """
     if not segments:
         raise ValueError("Add at least one timestamp range.")
 
-    CLIPS.mkdir(parents=True, exist_ok=True)
-    stem = sermon_path.stem[:40]
-    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in stem)
-    joined = output_path or (CLIPS / f"{safe}_highlights_joined.mp4")
-
-    part_paths: list[Path] = []
+    output_dir.mkdir(parents=True, exist_ok=True)
     total = len(segments)
+    clip_paths: list[Path] = []
+
     for idx, segment in enumerate(segments, start=1):
         if should_cancel and should_cancel():
             raise RuntimeError("Cancelled")
-        part = CLIPS / f"{safe}_part{idx:02d}.mp4"
 
-        def part_progress(ratio: float, msg: str, base=idx - 1) -> None:
+        out = output_dir / f"Clip{idx:03d}.mp4"
+
+        def part_progress(ratio: float, msg: str, _base: int = idx - 1) -> None:
             if progress_cb is None:
                 return
-            overall = (base + max(0.0, min(1.0, ratio))) / total
+            overall = (_base + max(0.0, min(1.0, ratio))) / total
             progress_cb(overall, f"[{idx}/{total}] {msg}")
 
         export_segment_clip(
             sermon_path,
             segment,
-            part,
+            out,
             progress_cb=part_progress,
             should_cancel=should_cancel,
         )
-        part_paths.append(part)
+        clip_paths.append(out.resolve())
 
-    return concat_clips(
-        part_paths,
-        joined,
-        progress_cb=lambda r, m: progress_cb((total - 1 + r) / total, m) if progress_cb else None,
-        should_cancel=should_cancel,
-    )
+    if progress_cb:
+        progress_cb(1.0, f"Exported {total} clip{'s' if total != 1 else ''}")
+
+    return clip_paths
