@@ -368,7 +368,7 @@ def _download_with_executable(
         "--no-playlist",
         "--no-warnings",
         "--color",
-        "no",
+        "never",
         "--newline",
         "--print",
         "after_move:filepath",
