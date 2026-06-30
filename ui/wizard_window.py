@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 from models.project import ClipSegment, MusicChoice, ProjectState, VerseChoice
 from services.ai_assistant import suggest_bible_verses, suggest_instrumentals
 from services.downloader import download_facebook_video
-from services.multi_clip import trim_and_join_segments
+from services.multi_clip import export_clips
 from services.music_downloader import AUDIO_EXTENSIONS, download_instrumental
 from services.trimmer import ffprobe_duration_seconds
 from services.filmora_launcher import open_filmora_project
@@ -41,13 +41,9 @@ from services.filmora_template import template_available
 from services.wfp_generator import build_layers, generate_wfp
 from utils.windows_paths import filmora_host_note
 from ui.preview_player import PreviewPlayer
-from utils.app_settings import (
-    KEY_LAST_COOKIES_FILE,
-    KEY_LAST_FB_URL,
-    settings,
-)
+from utils.app_settings import KEY_LAST_FB_URL, settings
 from utils.console_log import log_error, log_info, log_progress, log_step, log_warn
-from utils.paths import DOWNLOADS, ensure_directories
+from utils.paths import CLIPS, DOWNLOADS, ensure_directories
 from utils.timecode import format_timecode, parse_timecode, validate_segment_times
 
 
@@ -201,13 +197,17 @@ class WizardWindow(QMainWindow):
         "Download",
         "Timestamps",
         "Preview",
-        "Trim & join",
+        "Trim clips",
         "Bible verse",
         "Instrumental",
         "Layers",
         "Project name",
         "Export .wfp",
     )
+
+    # Background ffprobe signals (emitted from a daemon thread, consumed on UI thread)
+    _sermon_probed = Signal(float)
+    _sermon_probe_failed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -304,6 +304,8 @@ class WizardWindow(QMainWindow):
         self._apply_styles()
         self._apply_pointer_cursors()
         self._restore_prefs()
+        self._sermon_probed.connect(self._on_sermon_probed, Qt.ConnectionType.QueuedConnection)
+        self._sermon_probe_failed.connect(self._on_sermon_probe_failed, Qt.ConnectionType.QueuedConnection)
         self._update_nav()
         self._refresh_timestamp_hints()
         if self._wsl_repaint_hardening:
@@ -671,18 +673,15 @@ class WizardWindow(QMainWindow):
 
         self._url_edit = QLineEdit()
         self._url_edit.setPlaceholderText("https://www.facebook.com/...")
-        self._cookies_edit = QLineEdit()
-        self._cookies_edit.setReadOnly(True)
-        self._cookies_edit.setPlaceholderText("Optional cookies.txt for logged-in Facebook downloads")
-        cookies_browse = QPushButton("Cookies…")
-        cookies_browse.clicked.connect(self._browse_cookies)
-        cookies_row = QHBoxLayout()
-        cookies_row.addWidget(self._cookies_edit, stretch=1)
-        cookies_row.addWidget(cookies_browse)
 
-        self._download_backend_note = QLabel(
-            "Download backend: yt-dlp with 16 parallel fragments."
+        from utils.ffmpeg_paths import find_aria2c as _find_aria2c
+        _aria2c = _find_aria2c()
+        _backend = (
+            "yt-dlp + aria2c (detected) with 16 parallel fragments."
+            if _aria2c
+            else "yt-dlp with 16 parallel fragments."
         )
+        self._download_backend_note = QLabel(f"Download backend: {_backend}")
         self._download_backend_note.setObjectName("MutedHelpLabel")
         self._download_backend_note.setWordWrap(True)
 
@@ -696,7 +695,6 @@ class WizardWindow(QMainWindow):
         form = QFormLayout(form_box)
         form.setSpacing(10)
         form.addRow("Facebook URL", self._url_edit)
-        form.addRow("Cookies", cookies_row)
 
         layout.addWidget(form_box)
         layout.addWidget(self._download_backend_note)
@@ -803,14 +801,17 @@ class WizardWindow(QMainWindow):
         layout = QVBoxLayout(w)
         layout.setContentsMargins(4, 4, 8, 12)
         layout.setSpacing(12)
-        title = QLabel("Trim & join highlights")
+        title = QLabel("Trim clips")
         title.setObjectName("StepTitle")
-        subtitle = QLabel("Wordly trims each timestamp and concatenates them into one continuous video.")
+        subtitle = QLabel(
+            "Wordly trims each timestamp range into its own clip "
+            "(Clip001.mp4, Clip002.mp4, …). Trimming starts when you leave Preview."
+        )
         subtitle.setObjectName("StepSubtitle")
         subtitle.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(subtitle)
-        self._trim_result = QLabel("Trim and join starts when you leave Preview.")
+        self._trim_result = QLabel("Trimming starts when you leave Preview.")
         self._trim_result.setObjectName("MutedHelpLabel")
         self._trim_result.setWordWrap(True)
         layout.addWidget(self._trim_result)
@@ -987,8 +988,7 @@ class WizardWindow(QMainWindow):
         if idx == 2:
             return self._step_complete(0) and self._step_complete(1)
         if idx == 3:
-            joined = self._project.joined_clip_path
-            return bool(joined and joined.exists())
+            return bool(self._project.clip_paths and any(p.exists() for p in self._project.clip_paths))
         if idx == 4:
             return self._project.selected_verse is not None
         if idx == 5:
@@ -1020,7 +1020,7 @@ class WizardWindow(QMainWindow):
         elif index == 2:
             self._load_preview_for_current_sermon()
         elif index == 3:
-            self._ensure_trim_joined()
+            self._ensure_trim_clips()
         self._stack.update()
         self._request_full_repaint()
         self._update_nav()
@@ -1035,17 +1035,16 @@ class WizardWindow(QMainWindow):
         idx = self._stack.currentIndex()
         if idx == 2 and hasattr(self, "_preview"):
             self._preview.stop()
-            self._ensure_trim_joined()
+            self._ensure_trim_clips()
         if idx == 1 and not self._project.segments:
             QMessageBox.warning(self, "Wordly", "Add at least one timestamp segment.")
             return
         if idx == 3:
-            joined = self._project.joined_clip_path
-            if not joined or not joined.exists():
+            if not self._project.clip_paths or not any(p.exists() for p in self._project.clip_paths):
                 QMessageBox.warning(
                     self,
                     "Wordly",
-                    "Highlight reel is not ready yet. Wait for trim & join to finish.",
+                    "Clips are not ready yet. Wait for trimming to finish.",
                 )
                 return
         if idx == 6:
@@ -1060,21 +1059,10 @@ class WizardWindow(QMainWindow):
     def _restore_prefs(self) -> None:
         s = settings()
         self._url_edit.setText(s.value(KEY_LAST_FB_URL, "", type=str))
-        cookies = s.value(KEY_LAST_COOKIES_FILE, "", type=str)
-        if cookies:
-            self._cookies_edit.setText(cookies)
 
     def _save_prefs(self) -> None:
         s = settings()
         s.setValue(KEY_LAST_FB_URL, self._url_edit.text().strip())
-        cookies = self._cookies_edit.text().strip()
-        if cookies:
-            s.setValue(KEY_LAST_COOKIES_FILE, cookies)
-
-    def _browse_cookies(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Cookies file", "", "Text files (*.txt);;All files (*)")
-        if path:
-            self._cookies_edit.setText(path)
 
     def _open_local_sermon(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1088,18 +1076,39 @@ class WizardWindow(QMainWindow):
         self._set_sermon(Path(path))
 
     def _set_sermon(self, path: Path) -> None:
-        self._project.sermon_path = path.resolve()
-        try:
-            self._project.sermon_duration_s = ffprobe_duration_seconds(path)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Wordly", str(exc))
-            return
-        dur = format_timecode(self._project.sermon_duration_s)
-        self._download_result.setText(f"Loaded: {path.name} ({dur})")
-        self._status.setText(f"Sermon ready — {path}")
-        self._refresh_timestamp_hints()
+        """Set the active sermon path and probe its duration off the UI thread."""
+        resolved = path.resolve()
+        self._project.sermon_path = resolved
+        self._project.sermon_duration_s = 0.0
+        self._download_result.setText(f"Loading: {resolved.name}…")
+        self._status.setText(f"Loading — {resolved}")
+        # Start the preview immediately; the player can buffer while ffprobe runs.
         self._load_preview_for_current_sermon()
         self._update_nav()
+
+        def _probe() -> None:
+            try:
+                dur = ffprobe_duration_seconds(resolved)
+                self._sermon_probed.emit(dur)
+            except Exception as exc:  # noqa: BLE001
+                self._sermon_probe_failed.emit(str(exc))
+
+        threading.Thread(target=_probe, daemon=True).start()
+
+    @Slot(float)
+    def _on_sermon_probed(self, duration: float) -> None:
+        self._project.sermon_duration_s = duration
+        path = self._project.sermon_path
+        if path:
+            dur_str = format_timecode(duration)
+            self._download_result.setText(f"Loaded: {path.name} ({dur_str})")
+        self._status.setText(f"Sermon ready — {path}")
+        self._refresh_timestamp_hints()
+        self._update_nav()
+
+    @Slot(str)
+    def _on_sermon_probe_failed(self, msg: str) -> None:
+        QMessageBox.warning(self, "Wordly", msg)
 
     def _refresh_timestamp_hints(self) -> None:
         if not hasattr(self, "_seg_duration_hint"):
@@ -1174,14 +1183,11 @@ class WizardWindow(QMainWindow):
             QMessageBox.warning(self, "Wordly", "Paste a Facebook URL first.")
             return
         self._save_prefs()
-        cookies = Path(self._cookies_edit.text()) if self._cookies_edit.text().strip() else None
         self._project.fb_url = url
-        self._project.cookies_file = cookies
 
         def job(*, progress_cb, should_cancel):
             return download_facebook_video(
                 url,
-                cookies_file=cookies,
                 progress_cb=progress_cb,
                 should_cancel=should_cancel,
             )
@@ -1202,6 +1208,7 @@ class WizardWindow(QMainWindow):
             return
         seg = ClipSegment(start_t, end_t, self._seg_label.text().strip())
         self._project.segments.append(seg)
+        self._project.clip_paths = []
         self._project.joined_clip_path = None
         self._segment_list.addItem(seg.display_name)
         self._preview_segment.addItem(seg.display_name)
@@ -1218,6 +1225,7 @@ class WizardWindow(QMainWindow):
         self._segment_list.takeItem(row)
         self._preview_segment.removeItem(row)
         del self._project.segments[row]
+        self._project.clip_paths = []
         self._project.joined_clip_path = None
         self._update_nav()
 
@@ -1246,10 +1254,13 @@ class WizardWindow(QMainWindow):
         except Exception:
             pass
 
-    def _ensure_trim_joined(self) -> None:
-        joined = self._project.joined_clip_path
-        if joined and joined.exists():
-            self._trim_result.setText(f"Joined clip ready:\n{joined}")
+    def _ensure_trim_clips(self) -> None:
+        valid = [p for p in self._project.clip_paths if p.exists()]
+        if valid:
+            self._trim_result.setText(
+                f"{len(valid)} clip{'s' if len(valid) != 1 else ''} ready:\n"
+                + "\n".join(str(p) for p in valid)
+            )
             return
         if not self._project.sermon_path:
             self._trim_result.setText("Load a sermon on step 1 first.")
@@ -1258,9 +1269,9 @@ class WizardWindow(QMainWindow):
             self._trim_result.setText("Add timestamp segments on step 2 first.")
             return
         if not self._busy:
-            self._start_trim_join()
+            self._start_trim_clips()
 
-    def _start_trim_join(self) -> None:
+    def _start_trim_clips(self) -> None:
         if not self._project.sermon_path:
             QMessageBox.warning(self, "Wordly", "Load a sermon first.")
             return
@@ -1268,21 +1279,31 @@ class WizardWindow(QMainWindow):
             QMessageBox.warning(self, "Wordly", "Add timestamp segments first.")
             return
 
-        self._trim_result.setText("Trimming and joining highlights…")
+        self._trim_result.setText("Trimming clips…")
         sermon = self._project.sermon_path
         segments = list(self._project.segments)
+        stem = sermon.stem[:40]
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in stem)
+        output_dir = CLIPS / safe
 
         def job(*, progress_cb, should_cancel):
-            return trim_and_join_segments(
+            return export_clips(
                 sermon,
                 segments,
+                output_dir,
                 progress_cb=progress_cb,
                 should_cancel=should_cancel,
             )
 
-        def on_ok(path: Path) -> None:
-            self._project.joined_clip_path = path
-            self._trim_result.setText(f"Joined clip ready:\n{path}")
+        def on_ok(paths: list[Path]) -> None:
+            self._project.clip_paths = paths
+            # Keep joined_clip_path pointing at the first clip for Filmora export compat.
+            self._project.joined_clip_path = paths[0] if paths else None
+            n = len(paths)
+            self._trim_result.setText(
+                f"{n} clip{'s' if n != 1 else ''} ready:\n"
+                + "\n".join(str(p) for p in paths)
+            )
             self._update_nav()
 
         self._run_job(job, on_ok=on_ok, on_fail=lambda: None)
@@ -1405,7 +1426,9 @@ class WizardWindow(QMainWindow):
                 f"{s.start_text}–{s.end_text}" for s in self._project.segments[:4]
             )
             log_info("export", f"Segments: {seg_summary}")
-        if self._project.joined_clip_path:
+        if self._project.clip_paths:
+            log_info("export", f"Clips: {[str(p) for p in self._project.clip_paths]}")
+        elif self._project.joined_clip_path:
             log_info("export", f"Joined reel: {self._project.joined_clip_path}")
         if self._project.sermon_path:
             log_info("export", f"Sermon source: {self._project.sermon_path}")
