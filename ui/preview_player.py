@@ -61,13 +61,14 @@ class _AspectRatioFrame(QWidget):
         return True
 
     def heightForWidth(self, w: int) -> int:  # noqa: D401
-        return max(220, int(w * self._NUM / self._DEN))
+        return max(160, int(w * self._NUM / self._DEN))
 
 
 class PreviewPlayer(QWidget):
     """Sermon preview with Qt multimedia playback and FFmpeg scrub fallback."""
 
     position_changed_ms = Signal(int)
+    duration_changed_s = Signal(float)
     _frame_ready = Signal(QPixmap, int, str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -88,12 +89,12 @@ class PreviewPlayer(QWidget):
         self._stack = QStackedLayout(self._stack_host)
         self._stack.setContentsMargins(0, 0, 0, 0)
         self._video = QVideoWidget()
-        self._video.setMinimumHeight(220)
+        self._video.setMinimumHeight(160)
         self._video.setStyleSheet("background: #16181c;")
         self._video.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._frame = QLabel("No video loaded")
         self._frame.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._frame.setMinimumHeight(220)
+        self._frame.setMinimumHeight(160)
         self._frame.setStyleSheet("background: #16181c; color: #aaa;")
         self._stack.addWidget(self._video)
         self._stack.addWidget(self._frame)
@@ -126,7 +127,7 @@ class PreviewPlayer(QWidget):
 
         self._play_toggle = QPushButton("Play")
         self._play_toggle.setObjectName("PreviewControlButton")
-        self._play_toggle.setMinimumWidth(92)
+        self._play_toggle.setMinimumWidth(72)
         self._play_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self._play_toggle.clicked.connect(self.toggle_play_pause)
 
@@ -139,8 +140,8 @@ class PreviewPlayer(QWidget):
         self._hint.setWordWrap(True)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(0, 0, 0, 4)
+        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 2)
         layout.addWidget(self._stack_host)
         layout.addSpacing(4)
         layout.addLayout(controls)
@@ -154,6 +155,11 @@ class PreviewPlayer(QWidget):
 
     def has_media(self) -> bool:
         return self._path is not None
+
+    def duration_seconds(self) -> float:
+        if self._duration_ms > 0:
+            return self._duration_ms / 1000.0
+        return 0.0
 
     def attach_space_shortcut(self, shortcut_parent: QWidget) -> None:
         sc = QShortcut(QKeySequence(Qt.Key.Key_Space), shortcut_parent)
@@ -319,6 +325,7 @@ class PreviewPlayer(QWidget):
     def _on_player_duration(self, duration_ms: int) -> None:
         if duration_ms > 0:
             self._duration_ms = int(duration_ms)
+            self.duration_changed_s.emit(duration_ms / 1000.0)
             self._apply_slider_range()
 
     @Slot(QMediaPlayer.PlaybackState)

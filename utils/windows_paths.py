@@ -43,7 +43,7 @@ def filmora_host_note() -> str:
             "Windows can open files produced in WSL."
         )
     return (
-        "Media paths are absolute Mac paths. "
-        "Open the .wfp from the exports/<name>/ folder in Filmora — "
-        "keep it beside the media/ subfolder."
+        "Media paths use absolute Mac file paths. "
+        "Open the .wfp from exports/<name>/ in Filmora — "
+        "keep the project file beside its media/ subfolder."
     )

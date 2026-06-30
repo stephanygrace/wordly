@@ -31,7 +31,6 @@ from PySide6.QtWidgets import (
 )
 
 from models.project import ClipSegment, MusicChoice, ProjectState, VerseChoice
-from services.ai_assistant import suggest_bible_verses, suggest_instrumentals
 from services.downloader import download_backend_description, download_facebook_video
 from services.multi_clip import export_clips
 from services.music_downloader import AUDIO_EXTENSIONS, download_instrumental
@@ -49,6 +48,7 @@ from utils.paths import CLIPS, DOWNLOADS, ensure_directories
 from utils.timecode import (
     end_timecode_from_start_offset,
     format_timecode,
+    normalize_four_digit_timecode,
     parse_timecode,
     validate_segment_times,
 )
@@ -119,10 +119,10 @@ class _WslTitleBar(QWidget):
         self._drag_origin: QPoint | None = None
 
         self.setObjectName("WslTitleBar")
-        self.setFixedHeight(38)
+        self.setFixedHeight(32)
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(14, 0, 8, 0)
+        row.setContentsMargins(10, 0, 6, 0)
         row.setSpacing(6)
 
         self._title_label = QLabel(title)
@@ -133,7 +133,7 @@ class _WslTitleBar(QWidget):
         self._close_btn = QPushButton("✕")
         for btn in (self._min_btn, self._max_btn, self._close_btn):
             btn.setObjectName("WslTitleButton")
-            btn.setFixedSize(38, 28)
+            btn.setFixedSize(32, 24)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._close_btn.setObjectName("WslTitleCloseButton")
 
@@ -218,8 +218,8 @@ class WizardWindow(QMainWindow):
         super().__init__()
         ensure_directories()
         self.setWindowTitle("Wordly — Sermon Highlight Studio")
-        self.resize(1180, 760)
-        self.setMinimumSize(960, 640)
+        self.resize(880, 580)
+        self.setMinimumSize(720, 480)
         self._project = ProjectState()
         self._thread: QThread | None = None
         self._worker: _JobWorker | None = None
@@ -249,8 +249,8 @@ class WizardWindow(QMainWindow):
         self._stack.currentChanged.connect(self._on_step_changed)
 
         nav = QHBoxLayout()
-        nav.setSpacing(8)
-        nav.setContentsMargins(0, 2, 0, 0)
+        nav.setSpacing(6)
+        nav.setContentsMargins(0, 0, 0, 0)
         self._back_btn = QPushButton("← Back")
         self._back_btn.setObjectName("NavBackButton")
         self._back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -294,8 +294,8 @@ class WizardWindow(QMainWindow):
 
         body = QWidget()
         layout = QVBoxLayout(body)
-        layout.setContentsMargins(16, 8, 16, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(12, 6, 12, 8)
+        layout.setSpacing(6)
         layout.addWidget(self._step_indicator)
         layout.addWidget(self._stack, stretch=1)
         layout.addWidget(self._progress)
@@ -366,7 +366,7 @@ class WizardWindow(QMainWindow):
         bar.setObjectName("StepIndicatorBar")
         outer = QVBoxLayout(bar)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(8)
+        outer.setSpacing(6)
 
         self._step_title_label = QLabel(self._STEP_TITLES[0])
         self._step_title_label.setObjectName("StepCurrentTitle")
@@ -399,7 +399,15 @@ class WizardWindow(QMainWindow):
         viewport.setAutoFillBackground(True)
         inner.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         inner.setAutoFillBackground(True)
-        scroll.setWidget(inner)
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(0)
+        container_layout.addWidget(inner)
+        container_layout.addStretch(1)
+        container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        container.setAutoFillBackground(True)
+        scroll.setWidget(container)
         return scroll
 
     @staticmethod
@@ -433,7 +441,7 @@ class WizardWindow(QMainWindow):
             QMainWindow, QWidget {
                 background-color: #16181c;
                 color: #eceff4;
-                font-size: 13px;
+                font-size: 12px;
             }
             QLabel {
                 background-color: transparent;
@@ -444,7 +452,7 @@ class WizardWindow(QMainWindow):
             }
             QLabel#WslTitleLabel {
                 color: #eceff4;
-                font-size: 12px;
+                font-size: 11px;
                 font-weight: 600;
             }
             QPushButton#WslTitleButton {
@@ -454,7 +462,7 @@ class WizardWindow(QMainWindow):
                 background-color: transparent;
                 border: 1px solid transparent;
                 color: #c4c7cc;
-                font-size: 14px;
+                font-size: 12px;
             }
             QPushButton#WslTitleButton:hover {
                 background-color: #2a3038;
@@ -467,9 +475,9 @@ class WizardWindow(QMainWindow):
             }
             QLabel#StepCurrentTitle {
                 color: #b8bcc4;
-                font-size: 11px;
+                font-size: 10px;
                 font-weight: 600;
-                letter-spacing: 1px;
+                letter-spacing: 0.8px;
             }
             QFrame#StepTick {
                 background-color: #2f343c;
@@ -488,37 +496,37 @@ class WizardWindow(QMainWindow):
             }
             QGroupBox {
                 border: 1px solid #2f343c;
-                border-radius: 10px;
-                margin-top: 10px;
-                padding: 14px 12px 12px 12px;
+                border-radius: 8px;
+                margin-top: 8px;
+                padding: 10px 10px 8px 10px;
                 background-color: #1e2228;
                 font-weight: 600;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 14px;
-                padding: 0 8px;
+                left: 12px;
+                padding: 0 6px;
                 color: #9aa0a6;
                 background-color: transparent;
             }
             QLabel#StepTitle {
-                font-size: 20px;
+                font-size: 16px;
                 font-weight: 700;
                 color: #f3f4f6;
-                padding: 0 0 6px 0;
-                margin-bottom: 2px;
+                padding: 0 0 4px 0;
+                margin-bottom: 0;
             }
             QLabel#StepSubtitle, QLabel#MutedHelpLabel {
                 color: #9aa0a6;
-                font-size: 12px;
-                padding: 0 0 12px 0;
-                margin-bottom: 8px;
+                font-size: 11px;
+                padding: 0 0 8px 0;
+                margin-bottom: 4px;
             }
             QLabel#DurationHint, QLabel#InlineCaption {
                 color: #9aa0a6;
-                font-size: 12px;
-                padding: 0 0 10px 0;
-                margin-bottom: 6px;
+                font-size: 11px;
+                padding: 0 0 6px 0;
+                margin-bottom: 4px;
             }
             QLabel#InlineCaption {
                 padding: 0 2px 0 0;
@@ -526,19 +534,19 @@ class WizardWindow(QMainWindow):
             }
             QLabel#FieldError {
                 color: #f28b82;
-                font-size: 11px;
-                padding: 2px 0 10px 0;
-                margin-top: 2px;
+                font-size: 10px;
+                padding: 2px 0 6px 0;
+                margin-top: 0;
             }
             QLabel#JobStatusLabel {
                 color: #c4c7cc;
-                font-size: 12px;
-                padding: 4px 0;
+                font-size: 11px;
+                padding: 2px 0;
             }
             QLineEdit, QPlainTextEdit, QComboBox {
                 border: 1px solid #3c424c;
-                border-radius: 8px;
-                padding: 7px 10px;
+                border-radius: 6px;
+                padding: 5px 8px;
                 background-color: #0f1114;
                 selection-background-color: #3d5afe;
             }
@@ -552,17 +560,17 @@ class WizardWindow(QMainWindow):
             QPushButton {
                 background-color: #2a3038;
                 border: 1px solid #3c424c;
-                border-radius: 8px;
-                padding: 8px 14px;
+                border-radius: 6px;
+                padding: 5px 10px;
                 color: #eceff4;
             }
             QPushButton#NavBackButton, QPushButton#NavNextButton, QPushButton#CancelJobButton {
-                min-height: 34px;
-                max-height: 34px;
-                font-size: 13px;
+                min-height: 28px;
+                max-height: 28px;
+                font-size: 12px;
                 font-weight: 500;
-                padding: 6px 16px;
-                border-radius: 8px;
+                padding: 4px 12px;
+                border-radius: 6px;
             }
             QPushButton#NavBackButton {
                 background-color: #2a3038;
@@ -616,7 +624,7 @@ class WizardWindow(QMainWindow):
             }
             QLabel#SegmentComposerTitle {
                 color: #9aa0a6;
-                font-size: 12px;
+                font-size: 11px;
                 font-weight: 600;
                 letter-spacing: 0.4px;
                 padding: 0;
@@ -626,8 +634,8 @@ class WizardWindow(QMainWindow):
                 background-color: #243328;
                 border: 1px solid #3d8b6e;
                 color: #d4f0e4;
-                padding: 6px 14px;
-                font-size: 12px;
+                padding: 4px 10px;
+                font-size: 11px;
                 font-weight: 600;
             }
             QPushButton#SegmentAddButton:hover:enabled {
@@ -639,8 +647,8 @@ class WizardWindow(QMainWindow):
                 background-color: transparent;
                 border: 1px solid #4a5058;
                 color: #b8bcc4;
-                padding: 6px 14px;
-                font-size: 12px;
+                padding: 4px 10px;
+                font-size: 11px;
             }
             QPushButton#SegmentRemoveButton:hover:enabled {
                 border-color: #c85a5a;
@@ -654,9 +662,9 @@ class WizardWindow(QMainWindow):
                 background-color: transparent;
                 border: 1px solid #4a5058;
                 color: #b8bcc4;
-                padding: 5px 10px;
-                font-size: 12px;
-                border-radius: 8px;
+                padding: 4px 8px;
+                font-size: 11px;
+                border-radius: 6px;
             }
             QPushButton#GhostButton:hover:enabled,
             QPushButton#DurationQuickButton:hover:enabled {
@@ -664,8 +672,8 @@ class WizardWindow(QMainWindow):
                 color: #eceff4;
             }
             QPushButton#DurationQuickButton {
-                min-width: 42px;
-                padding: 5px 8px;
+                min-width: 36px;
+                padding: 4px 6px;
             }
             QPushButton:hover {
                 border-color: #5c6370;
@@ -695,8 +703,8 @@ class WizardWindow(QMainWindow):
                 padding: 4px;
             }
             QListWidget::item {
-                padding: 8px 10px;
-                border-radius: 6px;
+                padding: 6px 8px;
+                border-radius: 4px;
             }
             QListWidget::item:selected {
                 background-color: #2a3558;
@@ -706,9 +714,9 @@ class WizardWindow(QMainWindow):
                 background-color: #222832;
             }
             QProgressBar {
-                min-height: 14px;
+                min-height: 12px;
                 border: 1px solid #2f343c;
-                border-radius: 7px;
+                border-radius: 6px;
                 background-color: #0f1114;
                 text-align: center;
             }
@@ -759,15 +767,15 @@ class WizardWindow(QMainWindow):
             tick.style().polish(tick)
 
     def _configure_step_layout(self, layout: QVBoxLayout) -> None:
-        layout.setContentsMargins(4, 4, 8, 8)
-        layout.setSpacing(12)
+        layout.setContentsMargins(2, 2, 4, 4)
+        layout.setSpacing(8)
 
     @staticmethod
     def _configure_form_layout(form: QFormLayout) -> None:
-        form.setSpacing(12)
-        form.setVerticalSpacing(16)
-        form.setHorizontalSpacing(20)
-        form.setContentsMargins(6, 12, 6, 12)
+        form.setSpacing(8)
+        form.setVerticalSpacing(10)
+        form.setHorizontalSpacing(12)
+        form.setContentsMargins(4, 8, 4, 8)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
@@ -836,12 +844,12 @@ class WizardWindow(QMainWindow):
         segments_box = QGroupBox("Segments")
         segments_box.setObjectName("SegmentListBox")
         segments_layout = QVBoxLayout(segments_box)
-        segments_layout.setContentsMargins(10, 14, 10, 10)
-        segments_layout.setSpacing(8)
+        segments_layout.setContentsMargins(8, 10, 8, 8)
+        segments_layout.setSpacing(6)
         self._segment_list = QListWidget()
         self._segment_list.setObjectName("SegmentList")
         self._segment_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._segment_list.setMinimumHeight(120)
+        self._segment_list.setMinimumHeight(88)
         segments_layout.addWidget(self._segment_list)
         layout.addWidget(segments_box, stretch=1)
 
@@ -895,8 +903,8 @@ class WizardWindow(QMainWindow):
         add_panel = QWidget()
         add_panel.setObjectName("SegmentComposer")
         add_layout = QVBoxLayout(add_panel)
-        add_layout.setContentsMargins(12, 12, 12, 12)
-        add_layout.setSpacing(10)
+        add_layout.setContentsMargins(10, 10, 10, 10)
+        add_layout.setSpacing(8)
 
         composer_title = QLabel("New segment")
         composer_title.setObjectName("SegmentComposerTitle")
@@ -934,6 +942,7 @@ class WizardWindow(QMainWindow):
         title.setObjectName("StepTitle")
         layout.addWidget(title)
         self._preview = PreviewPlayer()
+        self._preview.duration_changed_s.connect(self._on_preview_duration)
         self._preview_segment = QComboBox()
         self._preview_segment.currentIndexChanged.connect(self._sync_preview_segment)
         layout.addWidget(self._preview_segment)
@@ -946,25 +955,23 @@ class WizardWindow(QMainWindow):
         self._configure_step_layout(layout)
         title = QLabel("Bible verse")
         title.setObjectName("StepTitle")
+        subtitle = QLabel(
+            "Type or paste the reference on the first line and the verse text below. "
+            "It appears on the text layer in your Filmora export."
+        )
+        subtitle.setObjectName("StepSubtitle")
+        subtitle.setWordWrap(True)
         layout.addWidget(title)
-        self._theme_edit = QLineEdit()
-        self._theme_edit.setPlaceholderText("e.g. hope, grace, perseverance")
-        suggest_btn = QPushButton("Find verses for theme")
-        suggest_btn.setObjectName("AccentButton")
-        suggest_btn.clicked.connect(self._suggest_verses)
-        self._verse_list = QListWidget()
-        self._verse_list.itemSelectionChanged.connect(self._pick_verse)
-        self._verse_preview = QPlainTextEdit()
-        self._verse_preview.setReadOnly(True)
-        self._verse_preview.setMinimumHeight(100)
-        form_box = QGroupBox("Theme")
-        form = QFormLayout(form_box)
-        self._configure_form_layout(form)
-        form.addRow("Theme", self._theme_edit)
-        layout.addWidget(form_box)
-        layout.addWidget(suggest_btn)
-        layout.addWidget(self._verse_list, stretch=1)
-        layout.addWidget(self._verse_preview)
+        layout.addWidget(subtitle)
+
+        self._verse_edit = QPlainTextEdit()
+        self._verse_edit.setPlaceholderText(
+            "e.g.\nJohn 3:16\nFor God so loved the world…"
+        )
+        self._verse_edit.setMinimumHeight(120)
+        self._verse_edit.textChanged.connect(self._sync_manual_verse)
+        layout.addWidget(self._verse_edit)
+        layout.addStretch(1)
         return w
 
     def _build_music_step(self) -> QWidget:
@@ -974,53 +981,38 @@ class WizardWindow(QMainWindow):
         title = QLabel("Instrumental bed")
         title.setObjectName("StepTitle")
         subtitle = QLabel(
-            "Suggest and download a bed, paste a YouTube (or other) audio URL, "
-            "or choose an MP3 already on your computer."
+            "Paste a YouTube (or other) audio URL to download, or choose an audio file "
+            "already on your computer."
         )
         subtitle.setObjectName("StepSubtitle")
         subtitle.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
-        suggest_btn = QPushButton("Suggest instrumentals for theme")
-        suggest_btn.clicked.connect(self._suggest_music)
-        self._music_list = QListWidget()
-        self._music_list.itemSelectionChanged.connect(self._pick_music)
-        self._download_music_btn = QPushButton("Download selected instrumental")
-        self._download_music_btn.clicked.connect(self._download_selected_music)
-
         self._music_url_edit = QLineEdit()
         self._music_url_edit.setPlaceholderText("https://www.youtube.com/watch?v=…")
         self._download_music_url_btn = QPushButton("Download from URL")
         self._download_music_url_btn.setObjectName("AccentButton")
         self._download_music_url_btn.clicked.connect(self._download_music_from_url)
-        url_row = QHBoxLayout()
-        url_row.addWidget(self._music_url_edit, stretch=1)
-        url_row.addWidget(self._download_music_url_btn)
-
         self._local_music_btn = QPushButton("Choose local audio…")
-        self._local_music_btn.setObjectName("AccentButton")
         self._local_music_btn.clicked.connect(self._browse_local_music)
-        self._clear_music_btn = QPushButton("Clear selection")
-        self._clear_music_btn.clicked.connect(self._clear_local_music)
 
-        local_row = QHBoxLayout()
-        local_row.addWidget(self._local_music_btn)
-        local_row.addWidget(self._clear_music_btn)
+        form_box = QGroupBox("Source")
+        form = QFormLayout(form_box)
+        self._configure_form_layout(form)
+        form.addRow("Audio URL", self._music_url_edit)
 
-        self._music_status = QLabel("No instrumental selected.")
+        layout.addWidget(form_box)
+        layout.addSpacing(6)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self._download_music_url_btn)
+        btn_row.addWidget(self._local_music_btn)
+        layout.addLayout(btn_row)
+        self._music_status = QLabel("No instrumental loaded yet.")
         self._music_status.setObjectName("MutedHelpLabel")
         self._music_status.setWordWrap(True)
-
-        layout.addWidget(suggest_btn)
-        layout.addWidget(self._music_list, stretch=1)
-        url_label = QLabel("Or paste an audio URL")
-        url_label.setObjectName("MutedHelpLabel")
-        layout.addWidget(url_label)
-        layout.addLayout(url_row)
-        layout.addLayout(local_row)
-        layout.addWidget(self._download_music_btn)
         layout.addWidget(self._music_status)
+        layout.addStretch(1)
         return w
 
     def _build_name_step(self) -> QWidget:
@@ -1051,7 +1043,7 @@ class WizardWindow(QMainWindow):
         w = QWidget()
         layout = QVBoxLayout(w)
         self._configure_step_layout(layout)
-        title = QLabel("Generate Filmora 14.2.9 project (.wfp)")
+        title = QLabel("Export")
         title.setObjectName("StepTitle")
         layout.addWidget(title)
         template_note = QLabel("")
@@ -1064,15 +1056,11 @@ class WizardWindow(QMainWindow):
         host_note.setWordWrap(True)
         layout.addWidget(template_note)
         layout.addWidget(host_note)
-        layout.addSpacing(8)
-        self._export_btn = QPushButton("Generate .wfp project file")
-        self._export_btn.setObjectName("AccentButton")
-        self._export_btn.clicked.connect(self._generate_wfp)
         self._export_result = QLabel("")
         self._export_result.setObjectName("MutedHelpLabel")
         self._export_result.setWordWrap(True)
-        layout.addWidget(self._export_btn)
         layout.addWidget(self._export_result)
+        layout.addStretch(1)
         return w
 
     # --- Navigation --------------------------------------------------------
@@ -1086,7 +1074,8 @@ class WizardWindow(QMainWindow):
         if idx == 2:
             return self._step_complete(0) and self._step_complete(1)
         if idx == 3:
-            return self._project.selected_verse is not None
+            verse = self._project.selected_verse
+            return bool(verse and verse.reference.strip() and verse.text.strip())
         if idx == 4:
             music = self._project.selected_music
             return bool(music and music.local_path and music.local_path.is_file())
@@ -1102,8 +1091,10 @@ class WizardWindow(QMainWindow):
         self._next_btn.setEnabled(can_advance)
         if self._busy and idx == 2:
             self._next_btn.setText("Trimming…")
+        elif idx == len(titles) - 1:
+            self._next_btn.setText("Generate .wfp project file")
         else:
-            self._next_btn.setText("Finish" if idx == len(titles) - 1 else "Next →")
+            self._next_btn.setText("Next →")
         self._progress.setVisible(self._busy)
         self._status.setVisible(self._busy)
         self._refresh_step_indicator()
@@ -1143,14 +1134,14 @@ class WizardWindow(QMainWindow):
         name = self._project_name_edit.text().strip() or default_export_project_name()
         if template_available():
             self._export_template_note.setText(
-                "Filmora layout is cloned from assets/filmora_templates/sermon-highlights.wfp "
-                "(and video.mp4 / music.mp3 / image.jpg beside it). "
-                f"Click Finish to write exports/{name}/{name}.wfp with a media/ folder."
+                "Wordly clones assets/filmora_templates/sermon-highlights.wfp and patches it "
+                "with your sermon source, trimmed segments, instrumental, and cover. "
+                f"Writes exports/{name}/{name}.wfp and a media/ folder beside it."
             )
         else:
             self._export_template_note.setText(
                 "Add sermon-highlights.wfp plus video.mp4, music.mp3, and image.jpg under "
-                "assets/filmora_templates/ (save from Filmora 14.2.9 on this PC)."
+                "assets/filmora_templates/ (save a blank project from Filmora 15 on this Mac)."
             )
 
     def _go_back(self) -> None:
@@ -1216,6 +1207,12 @@ class WizardWindow(QMainWindow):
                 self._sermon_probe_failed.emit(str(exc))
 
         threading.Thread(target=_probe, daemon=True).start()
+
+    @Slot(float)
+    def _on_preview_duration(self, duration_s: float) -> None:
+        if duration_s > 0:
+            self._project.sermon_duration_s = duration_s
+            self._refresh_timestamp_hints()
 
     @Slot(float)
     def _on_sermon_probed(self, duration: float) -> None:
@@ -1319,10 +1316,12 @@ class WizardWindow(QMainWindow):
         self._run_job(job, on_ok=lambda path: self._set_sermon(path))
 
     def _set_segment_end_offset(self, offset_s: float) -> None:
-        start_t = self._seg_start.text().strip()
+        start_t = normalize_four_digit_timecode(self._seg_start.text().strip())
         if not start_t:
             QMessageBox.warning(self, "Wordly", "Enter a start time first.")
             return
+        if start_t != self._seg_start.text().strip():
+            self._seg_start.setText(start_t)
         try:
             media = self._project.sermon_duration_s or None
             end_t = end_timecode_from_start_offset(
@@ -1446,64 +1445,26 @@ class WizardWindow(QMainWindow):
             if advance_to is not None:
                 self._stack.setCurrentIndex(advance_to)
 
-        self._run_job(job, on_ok=on_ok, on_fail=lambda: None)
+        self._run_job(job, on_ok=on_ok, on_fail=lambda _err: None)
 
-    def _suggest_verses(self) -> None:
-        theme = self._theme_edit.text().strip()
-        self._project.theme = theme
-        try:
-            verses = suggest_bible_verses(theme)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Wordly", str(exc))
-            return
-        self._project.verse_choices = verses
-        self._verse_list.clear()
-        for verse in verses:
-            self._verse_list.addItem(f"{verse.reference} — {verse.text[:80]}…")
+    @classmethod
+    def _parse_verse_input(cls, raw: str) -> tuple[str, str] | None:
+        lines = [line.strip() for line in raw.strip().splitlines() if line.strip()]
+        if len(lines) < 2:
+            return None
+        reference = lines[0]
+        body = "\n".join(lines[1:]).strip()
+        if not reference or not body:
+            return None
+        return reference, body
 
-    def _pick_verse(self) -> None:
-        row = self._verse_list.currentRow()
-        if row < 0 or row >= len(self._project.verse_choices):
-            return
-        verse = self._project.verse_choices[row]
-        self._project.selected_verse = verse
-        self._verse_preview.setPlainText(f"{verse.reference}\n\n{verse.text}")
+    def _sync_manual_verse(self) -> None:
+        parsed = self._parse_verse_input(self._verse_edit.toPlainText())
+        if parsed:
+            self._project.selected_verse = VerseChoice(*parsed)
+        else:
+            self._project.selected_verse = None
         self._update_nav()
-
-    def _suggest_music(self) -> None:
-        theme = self._theme_edit.text().strip() or self._project.theme
-        if not theme:
-            QMessageBox.warning(self, "Wordly", "Enter a theme on the Bible verse step first.")
-            return
-        self._project.theme = theme
-        try:
-            choices = suggest_instrumentals(theme)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Wordly", str(exc))
-            return
-        self._project.music_choices = choices
-        self._music_list.clear()
-        for item in choices:
-            self._music_list.addItem(item.display_name)
-
-    def _pick_music(self) -> None:
-        row = self._music_list.currentRow()
-        if row < 0 or row >= len(self._project.music_choices):
-            return
-        self._project.selected_music = self._project.music_choices[row]
-        self._music_status.setText(f"Selected: {self._project.selected_music.display_name}")
-        self._update_nav()
-
-    def _download_selected_music(self) -> None:
-        music = self._project.selected_music
-        if music is None:
-            QMessageBox.warning(self, "Wordly", "Select an instrumental first.")
-            return
-        if music.local_path and music.local_path.is_file():
-            self._music_status.setText(f"Using local file: {music.local_path.name}")
-            return
-        query = music.search_query or f"instrumental piano {music.title}"
-        self._run_instrumental_download(query, title=music.title)
 
     def _download_music_from_url(self) -> None:
         url = self._music_url_edit.text().strip()
@@ -1519,8 +1480,7 @@ class WizardWindow(QMainWindow):
         def on_ok(path: Path) -> None:
             music = MusicChoice(title=title or path.stem, local_path=path)
             self._project.selected_music = music
-            self._music_list.clearSelection()
-            self._music_status.setText(f"Downloaded: {path.name}")
+            self._music_status.setText(f"Loaded: {path.name}")
             self._update_nav()
 
         self._run_job(job, on_ok=on_ok)
@@ -1539,17 +1499,36 @@ class WizardWindow(QMainWindow):
             QMessageBox.warning(self, "Wordly", "Please choose a supported audio file.")
             return
         self._project.selected_music = MusicChoice(title=p.stem, local_path=p)
-        self._music_list.clearSelection()
-        self._music_status.setText(f"Local file: {p.name}")
+        self._music_status.setText(f"Loaded: {p.name}")
         self._update_nav()
 
-    def _clear_local_music(self) -> None:
-        self._project.selected_music = None
-        self._music_list.clearSelection()
-        self._music_status.setText("No instrumental selected.")
-        self._update_nav()
+    def _resolve_sermon_duration_s(self) -> float:
+        if self._project.sermon_duration_s > 0:
+            return self._project.sermon_duration_s
+        if hasattr(self, "_preview"):
+            preview_dur = self._preview.duration_seconds()
+            if preview_dur > 0:
+                return preview_dur
+        sermon = self._project.sermon_path
+        if sermon and sermon.is_file():
+            return ffprobe_duration_seconds(sermon.resolve())
+        return 0.0
+
+    def _export_progress(self, ratio: float, message: str) -> None:
+        log_progress("export", message, ratio=ratio if ratio >= 0 else None)
+        if ratio >= 0:
+            self._progress.setValue(int(min(1000, max(0, ratio * 1000))))
+            self._progress.setFormat(f"{int(ratio * 100)}% — {message[:80]}")
+        else:
+            self._progress.setFormat(message[:120])
+        self._status.setText(message)
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
 
     def _generate_wfp(self) -> None:
+        if self._busy:
+            return
         self._project.project_name = self._project_name_edit.text().strip() or default_export_project_name()
         log_step("export", f"Generate .wfp requested for {self._project.project_name!r}")
         if self._project.segments:
@@ -1563,49 +1542,84 @@ class WizardWindow(QMainWindow):
             log_info("export", f"Joined reel: {self._project.joined_clip_path}")
         if self._project.sermon_path:
             log_info("export", f"Sermon source: {self._project.sermon_path}")
+
+        self._busy = True
+        self._update_nav()
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._progress.setFormat("Preparing export…")
+        self._status.setVisible(True)
+        self._export_progress(-1.0, "Preparing Filmora export…")
+
+        sermon = self._project.sermon_path
+        if sermon and sermon.is_file():
+            if self._project.sermon_duration_s <= 0:
+                self._export_progress(-1.0, "Reading sermon length…")
+                try:
+                    self._project.sermon_duration_s = self._resolve_sermon_duration_s()
+                except Exception as exc:  # noqa: BLE001
+                    self._busy = False
+                    self._update_nav()
+                    self._on_wfp_export_failed(f"Could not read sermon duration: {exc}")
+                    return
+                if self._project.sermon_duration_s <= 0:
+                    self._busy = False
+                    self._update_nav()
+                    self._on_wfp_export_failed(
+                        "Sermon duration is not ready yet. Wait for the download step to "
+                        "finish loading, then try again."
+                    )
+                    return
+
         try:
-            path = generate_wfp(self._project)
+            path = generate_wfp(self._project, progress_cb=self._export_progress)
         except Exception as exc:  # noqa: BLE001
-            log_error("export", str(exc))
-            QMessageBox.critical(self, "Wordly", str(exc))
-            return
+            self._on_wfp_export_failed(str(exc))
+        else:
+            self._on_wfp_exported(path)
+        finally:
+            self._busy = False
+            self._progress.setValue(1000)
+            self._progress.setFormat("Done")
+            self._update_nav()
+
+    def _on_wfp_exported(self, path: Path) -> None:
         log_step("export", f"Export finished: {path}")
         bundle_dir = path.parent
         self._export_result.setText(f"Saved Filmora project:\n{path}\n\nMedia folder:\n{bundle_dir / 'media'}")
         self._status.setText(f".wfp ready — {path}")
-        QMessageBox.information(
-            self,
-            "Wordly",
-            f"Filmora 14.2.9 project saved:\n{path}\n\n"
-            f"All video, music, and verse files are copied to:\n{bundle_dir / 'media'}\n\n"
-            "Keep the .wfp and media/ folder together. Open the .wfp from that folder "
-            "in Filmora 14.2.9 (File → Open Project).\n\n"
-            f"{filmora_host_note()}",
-        )
         try:
+            log_step("export", f"Launching Filmora with {path.name}")
             open_filmora_project(path)
             self._status.setText(f"Opened in Filmora — {path}")
         except Exception as exc:  # noqa: BLE001
+            log_error("export", f"Filmora launch failed: {exc}")
             QMessageBox.warning(
                 self,
                 "Wordly",
                 f"Project saved to:\n{path}\n\nCould not launch Filmora automatically:\n{exc}\n\n"
-                "Open the file manually in Wondershare Filmora 14.2.9.",
+                "Double-click the .wfp in Finder, or open it from Filmora "
+                "(File → Open Project).",
             )
+
+    def _on_wfp_export_failed(self, message: str) -> None:
+        log_error("export", message)
+        QMessageBox.critical(self, "Wordly", message)
 
     # --- Job runner --------------------------------------------------------
 
     def _run_job(self, fn, *, on_ok, on_fail=None) -> None:
         if self._busy:
             return
+        self._wait_for_job_thread()
         self._busy = True
         self._cancel_btn.setVisible(True)
         log_step("wizard", "Background job started")
         self._update_nav()
         self._progress.setValue(0)
-        # Keep QThread unparented; worker signals must use QueuedConnection so UI
-        # widgets are only touched on the main thread (avoids setParent warnings).
-        thread = QThread(self)
+        # Unparented QThread — parenting to the window caused aborts when a long
+        # export overlapped thread teardown from a prior job.
+        thread = QThread()
         worker = _JobWorker(fn)
         worker.moveToThread(thread)
         thread.started.connect(worker.run, Qt.ConnectionType.QueuedConnection)
@@ -1622,6 +1636,16 @@ class WizardWindow(QMainWindow):
         self._job_on_ok = on_ok
         self._job_on_fail = on_fail
         thread.start()
+
+    def _wait_for_job_thread(self) -> None:
+        thread = self._thread
+        if thread is None:
+            return
+        if thread.isRunning():
+            thread.quit()
+            thread.wait(30_000)
+        self._thread = None
+        self._worker = None
 
     @Slot(str)
     def _on_job_failed(self, msg: str) -> None:
@@ -1666,8 +1690,8 @@ class WizardWindow(QMainWindow):
                 on_ok(result)
         else:
             if on_fail:
-                on_fail()
-            if err and err != "Cancelled":
+                on_fail(err)
+            elif err and err != "Cancelled":
                 QMessageBox.warning(self, "Wordly", err)
 
     def _cancel_job(self) -> None:
@@ -1680,10 +1704,7 @@ class WizardWindow(QMainWindow):
             if app is not None:
                 app.removeEventFilter(self)
         self._save_prefs()
+        self._wait_for_job_thread()
         if self._worker is not None:
             self._worker.cancel()
-        thread = self._thread
-        if thread is not None and thread.isRunning():
-            thread.quit()
-            thread.wait(5000)
         super().closeEvent(event)
