@@ -65,6 +65,24 @@ def format_timecode_digits(digits: str) -> str:
     return f"{clean[:2]}:{clean[2:4]}:{clean[4:]}"
 
 
+def normalize_four_digit_timecode(value: str) -> str:
+    """Expand a four-digit HH:MM entry to HH:MM:00.
+
+    Typing ``0145`` is shown as ``01:45``. Before +30s / +60s math, treat that as
+    one hour forty-five minutes, not one minute forty-five seconds.
+    """
+    raw = value.strip()
+    if not raw:
+        return raw
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) != 4 or raw.count(":") != 1:
+        return raw
+    hours, minutes = raw.split(":", 1)
+    if len(minutes) != 2:
+        return raw
+    return f"{hours}:{minutes}:00"
+
+
 def format_timecode(seconds: float) -> str:
     """Format seconds as HH:MM:SS for display and editing."""
     if seconds < 0:

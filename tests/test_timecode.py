@@ -5,6 +5,7 @@ import unittest
 from utils.timecode import (
     end_timecode_from_start_offset,
     format_timecode_digits,
+    normalize_four_digit_timecode,
     parse_timecode,
     validate_range,
     validate_segment_times,
@@ -37,6 +38,19 @@ class TestTimecode(unittest.TestCase):
         self.assertEqual(format_timecode_digits("012530"), "01:25:30")
         self.assertEqual(format_timecode_digits("01:25:30"), "01:25:30")
         self.assertEqual(format_timecode_digits("01253099"), "01:25:30")
+
+    def test_normalize_four_digit_timecode(self) -> None:
+        self.assertEqual(normalize_four_digit_timecode("01:45"), "01:45:00")
+        self.assertEqual(normalize_four_digit_timecode("01:45:00"), "01:45:00")
+        self.assertEqual(normalize_four_digit_timecode("01:45:30"), "01:45:30")
+        self.assertEqual(
+            end_timecode_from_start_offset(normalize_four_digit_timecode("01:45"), 30),
+            "01:45:30",
+        )
+        self.assertEqual(
+            end_timecode_from_start_offset(normalize_four_digit_timecode("01:45"), 60),
+            "01:46:00",
+        )
 
     def test_end_timecode_from_start_offset(self) -> None:
         self.assertEqual(
