@@ -49,6 +49,10 @@ class ProjectState:
     sermon_path: Optional[Path] = None
     sermon_duration_s: float = 0.0
     segments: list[ClipSegment] = field(default_factory=list)
+    # Individual exported clips (Clip001.mp4, Clip002.mp4, …) — primary storage.
+    clip_paths: list[Path] = field(default_factory=list)
+    # Single merged clip kept for Filmora template export; set to clip_paths[0]
+    # when no merge is performed, or to the concat output when merge is used.
     joined_clip_path: Optional[Path] = None
     theme: str = ""
     verse_choices: list[VerseChoice] = field(default_factory=list)

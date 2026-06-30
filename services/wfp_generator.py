@@ -58,12 +58,15 @@ def _safe_duration(path: Path, fallback_s: float = 60.0) -> float:
 def build_layers(project: ProjectState) -> list[WfpLayer]:
     layers: list[WfpLayer] = []
     sermon = project.sermon_path.resolve() if project.sermon_path and project.sermon_path.is_file() else None
-    joined = (
-        project.joined_clip_path.resolve()
-        if project.joined_clip_path and project.joined_clip_path.exists()
-        else None
-    )
-    if sermon and joined and sermon != joined:
+
+    # Prefer the new per-clip paths; fall back to legacy joined_clip_path.
+    valid_clips = [p.resolve() for p in project.clip_paths if p.exists()]
+    if not valid_clips and project.joined_clip_path and project.joined_clip_path.exists():
+        valid_clips = [project.joined_clip_path.resolve()]
+
+    # Show sermon source only when it differs from the first exported clip.
+    first_clip = valid_clips[0] if valid_clips else None
+    if sermon and first_clip and sermon != first_clip:
         layers.append(
             WfpLayer(
                 layer_id=_new_id(),
@@ -74,13 +77,15 @@ def build_layers(project: ProjectState) -> list[WfpLayer]:
                 duration_us=_us(_safe_duration(sermon)),
             )
         )
-    if project.joined_clip_path and project.joined_clip_path.exists():
-        dur = _safe_duration(project.joined_clip_path)
+
+    for idx, clip in enumerate(valid_clips, start=1):
+        dur = _safe_duration(clip)
+        name = f"Clip {idx:03d}" if len(valid_clips) > 1 else "Sermon Highlights"
         layers.append(
             WfpLayer(
                 layer_id=_new_id(),
-                name="Sermon Highlights",
-                media_path=project.joined_clip_path.resolve(),
+                name=name,
+                media_path=clip,
                 track_type="video",
                 start_us=0,
                 duration_us=_us(dur),
