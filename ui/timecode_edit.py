@@ -16,6 +16,9 @@ class TimecodeLineEdit(QLineEdit):
     def _format_as_timecode(self, text: str) -> None:
         if self._formatting:
             return
+        if "." in text:
+            # Fractional seconds (e.g. Claude's 00:50:10.25) are kept as typed.
+            return
 
         cursor_from_end = len(text) - self.cursorPosition()
         formatted = format_timecode_digits(text)
