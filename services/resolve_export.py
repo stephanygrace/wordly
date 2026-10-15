@@ -137,6 +137,8 @@ def _write_captions_srt(
         first, last = visible_span(dur_s, handle_s)
         for cap in _visible_captions(captions, first, last):
             cap = Caption(cap.start - first, cap.end - first, cap.text)
+            if not cap.text.strip():
+                continue  # an inserted line left empty
             n = len(entries) + 1
             start = _srt_timestamp(offset_s + cap.start)
             end = _srt_timestamp(offset_s + cap.end)

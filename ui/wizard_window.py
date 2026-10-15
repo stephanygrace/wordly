@@ -52,7 +52,7 @@ from services.claude_client import MissingApiKey, api_key, save_api_key
 from services.highlights import MAX_TOTAL_S, HighlightPlan, find_highlights, format_clock
 from services.highlights import format_timecode as highlight_timecode
 from services.caption_style import DEFAULT_STYLE_NAME, CaptionStyle, load_caption_styles
-from services.transcribe import Caption, transcribe_clips, whisper_backend_label, whisper_model_name
+from services.transcribe import Caption, transcribe_clips, whisper_backend_label, whisper_model_name, word_timings
 from ui import theme
 from ui.preview_player import PreviewPlayer
 from ui.timecode_edit import TimecodeLineEdit
@@ -83,6 +83,7 @@ _STEPS = (
 
 # "John 3:16", "1 Corinthians 13:4-7", "Awit 23:1" on the first line of a pasted verse.
 _VERSE_REFERENCE_RE = re.compile(r"^[1-3]?\s*[^\W\d_][\w .]*\s\d+:\d+")
+_CAPTION_TIME_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)\s*s?\s*$")
 
 
 class _JobWorker(QObject):
@@ -236,6 +237,31 @@ def _short_clock(seconds: float) -> str:
     """1:05:30 for long times, 4:12 under an hour."""
     clock = format_clock(seconds)
     return clock[2:] if clock.startswith("0:") else clock
+
+
+class _SpaceTogglesPlayback(QObject):
+    """Space plays/pauses instead of starting an edit that replaces the cell.
+
+    Inside an open cell editor Space still types a space.
+    """
+
+    def __init__(self, table: QTableWidget, toggle) -> None:
+        super().__init__(table)
+        self._table = table
+        self._toggle = toggle
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if (
+            event.type() in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress)
+            and event.key() == Qt.Key.Key_Space
+            and not event.modifiers()
+            and self._table.state() != QAbstractItemView.State.EditingState
+        ):
+            if event.type() == QEvent.Type.KeyPress:
+                self._toggle()
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
 
 
 class WizardWindow(QMainWindow):
@@ -720,7 +746,7 @@ class WizardWindow(QMainWindow):
             self._caption_styles = {}
         if not self._caption_styles:
             self._caption_styles = {DEFAULT_STYLE_NAME: CaptionStyle(DEFAULT_STYLE_NAME)}
-        self._style_card = Card("Look")
+        self._style_card = Card("Preview")
         self._caption_style_combo = QComboBox()
         self._caption_style_combo.addItems(list(self._caption_styles))
         saved_style = settings().value(KEY_CAPTION_STYLE, DEFAULT_STYLE_NAME, type=str)
@@ -732,19 +758,43 @@ class WizardWindow(QMainWindow):
         self._caption_preview.setObjectName("CaptionStage")
         self._caption_preview.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
         self._caption_preview.setWordWrap(True)
-        self._caption_preview.setMinimumHeight(170)
+        self._caption_preview.setMinimumHeight(110)
         self._caption_preview_index = 0
         self._caption_preview_timer = QTimer(self)
         self._caption_preview_timer.setInterval(450)
         self._caption_preview_timer.timeout.connect(self._tick_caption_preview)
+        # Check captions against the clip: click a caption to play from it; the caption
+        # under the video follows playback with the spoken word lit.
+        self._caption_player = PreviewPlayer()
+        self._caption_player.position_changed_ms.connect(self._on_caption_player_position)
+        self._caption_clip_idx: int | None = None
+        self._live_caption: tuple[int, int, float] | None = None  # clip, caption, seconds
+        self._caption_rows: dict[tuple[int, int], int] = {}
         self._style_card.body.addWidget(self._caption_style_combo)
+        self._style_card.body.addWidget(self._caption_player)
         self._style_card.body.addWidget(self._caption_preview)
-        self._style_card.body.addWidget(label("Add your own looks in assets/caption_styles.json.", "Faint", wrap=True))
+        self._style_card.body.addWidget(
+            label(
+                "Click a caption to play the clip from there and check it against what's said. "
+                "Add your own looks in assets/caption_styles.json.",
+                "Faint",
+                wrap=True,
+            )
+        )
         left.addWidget(self._style_card)
         left.addStretch(1)
 
         self._transcript_card = Card("Transcript")
         self._transcribe_btn = button("Transcribe", "Small", on_click=lambda: self._start_transcription())
+        self._insert_caption_btn = button(
+            "＋ Insert line",
+            "Small",
+            tooltip="Add a caption for missing words: pause the clip where they're said, then click.",
+            on_click=self._insert_caption_line,
+        )
+        self._delete_caption_btn = button("Delete line", "Small", tooltip="Remove the selected caption", on_click=self._delete_caption_line)
+        self._transcript_card.header.addWidget(self._insert_caption_btn)
+        self._transcript_card.header.addWidget(self._delete_caption_btn)
         self._transcript_card.header.addWidget(self._transcribe_btn)
         self._captions_status = label("", "Muted", wrap=True)
         self._transcript_card.body.addWidget(self._captions_status)
@@ -759,6 +809,15 @@ class WizardWindow(QMainWindow):
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._captions_table.setMinimumHeight(260)
         self._captions_table.itemChanged.connect(self._on_caption_edited)
+        self._captions_table.currentCellChanged.connect(lambda row, *_: self._play_caption_row(row))
+        # Typing on a selected row used to replace its text (a stray Space blanked captions).
+        self._captions_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed
+        )
+        self._captions_table.installEventFilter(
+            _SpaceTogglesPlayback(self._captions_table, self._toggle_caption_playback)
+        )
+        self._caption_player.attach_space_shortcut(page)
         self._transcript_card.body.addWidget(self._captions_table)
         right.addWidget(self._transcript_card)
 
@@ -783,6 +842,12 @@ class WizardWindow(QMainWindow):
     def _render_caption_preview(self) -> None:
         """Approximate the caption look; the highlight cycles like it will in Resolve."""
         style = self._selected_caption_style()
+        live = self._live_caption_html(style)
+        if live is not None:
+            # Following the clip: show what's on screen at the playhead.
+            self._caption_preview.setText(live)
+            self._caption_preview_timer.stop()
+            return
         sample = "God is good all the time"
         if self._project.captions_current():
             first = next((c for clip in self._project.clip_captions for c in clip), None)
@@ -800,6 +865,75 @@ class WizardWindow(QMainWindow):
         else:
             self._caption_preview_timer.stop()
 
+    def _live_caption_html(self, style: CaptionStyle) -> str | None:
+        if self._live_caption is None or not self._project.captions_current():
+            return None
+        clip_idx, cap_idx, t = self._live_caption
+        try:
+            caption = self._project.clip_captions[clip_idx][cap_idx]
+        except IndexError:
+            return None
+        if not (caption.start - 0.05 <= t < caption.end + 0.3):
+            return ""  # between captions: nothing on screen
+        tokens = word_timings(caption)
+        lit = next((i for i, (_, a, b) in enumerate(tokens) if a <= t < b), len(tokens) - 1 if t >= caption.end else -1)
+        return " ".join(
+            f'<span style="color:{style.highlight_color if style.highlight_color and i == lit else style.text_color}">'
+            f"{style.display_text(word)}</span>"
+            for i, (word, _, _) in enumerate(tokens)
+        )
+
+    def _load_caption_clip(self, clip_idx: int) -> bool:
+        clips = self._project.clip_paths
+        if not (0 <= clip_idx < len(clips)) or not clips[clip_idx].exists():
+            return False
+        if self._caption_clip_idx != clip_idx:
+            self._caption_player.load_file(clips[clip_idx])
+            self._caption_clip_idx = clip_idx
+        return True
+
+    def _play_caption_row(self, row: int) -> None:
+        item = self._captions_table.item(row, 2) if row >= 0 else None
+        key = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if not key or not self._project.captions_current():
+            return
+        clip_idx, cap_idx = key
+        if not self._load_caption_clip(clip_idx):
+            return
+        caption = self._project.clip_captions[clip_idx][cap_idx]
+        self._live_caption = (clip_idx, cap_idx, caption.start)
+        self._caption_player.seek_seconds(caption.start)
+        self._caption_player.play()
+        self._render_caption_preview()
+
+    def _toggle_caption_playback(self) -> None:
+        if self._caption_clip_idx is None:
+            self._play_caption_row(max(0, self._captions_table.currentRow()))
+        else:
+            self._caption_player.toggle_play_pause()
+
+    def _on_caption_player_position(self, ms: int) -> None:
+        if self._caption_clip_idx is None or not self._project.captions_current():
+            return
+        clip_idx, t = self._caption_clip_idx, ms / 1000.0
+        captions = self._project.clip_captions[clip_idx]
+        # The caption on screen: the last one that has started.
+        cap_idx = max((i for i, c in enumerate(captions) if c.start - 0.05 <= t), default=0)
+        self._live_caption = (clip_idx, cap_idx, t)
+        row = self._caption_rows.get((clip_idx, cap_idx))
+        table = self._captions_table
+        if row is not None and row != table.currentRow() and table.state() != QAbstractItemView.State.EditingState:
+            table.blockSignals(True)
+            table.setCurrentCell(row, 2)
+            table.blockSignals(False)
+            table.scrollToItem(table.item(row, 2))
+        self._render_caption_preview()
+
+    def _reset_caption_player(self) -> None:
+        self._caption_player.clear()
+        self._caption_clip_idx = None
+        self._live_caption = None
+
     def _captions_enabled(self) -> bool:
         return hasattr(self, "_auto_captions_check") and self._auto_captions_check.isChecked()
 
@@ -816,28 +950,39 @@ class WizardWindow(QMainWindow):
         self._transcript_card.setEnabled(enabled)
         self._transcribe_btn.setEnabled(enabled and not self._busy and bool(self._project.clip_paths))
         self._transcribe_btn.setText("Transcribe again" if self._project.clip_captions else "Transcribe")
+        editable = enabled and not self._busy and self._project.captions_current()
+        self._insert_caption_btn.setEnabled(editable)
+        self._delete_caption_btn.setEnabled(editable)
 
         if not self._project.captions_current():
             self._fill_captions_table([])
+            self._reset_caption_player()
         else:
             self._fill_captions_table(self._project.clip_captions)
+            if self._caption_clip_idx is None and enabled:
+                self._load_caption_clip(0)  # show the first frame, ready to play
 
-        if not enabled:
-            text = "Captions are off. Continue to skip this step."
-        elif self._project.captions_current():
-            count = sum(len(c) for c in self._project.clip_captions)
-            text = f"{count} captions from {len(self._project.clip_captions)} clip(s). Fix any wrong words below."
-        elif self._project.clip_captions:
-            text = "The clips changed since the last transcription. Continue to transcribe them again."
-        else:
-            text = "Not transcribed yet. Continue transcribes the clips, then you can review the text here."
-        self._captions_status.setText(text)
+        self._captions_status.setText(self._captions_status_text())
         self._render_caption_preview()
+
+    def _captions_status_text(self) -> str:
+        if not self._captions_enabled():
+            return "Captions are off. Continue to skip this step."
+        if self._project.captions_current():
+            count = sum(len(c) for c in self._project.clip_captions)
+            return (
+                f"{count} captions from {len(self._project.clip_captions)} clip(s). Double-click to fix words or times. "
+                "Missing words? Pause the clip where they're said and click ＋ Insert line."
+            )
+        if self._project.clip_captions:
+            return "The clips changed since the last transcription. Continue to transcribe them again."
+        return "Not transcribed yet. Continue transcribes the clips, then you can review the text here."
 
     def _fill_captions_table(self, clip_captions: list[list[Caption]]) -> None:
         table = self._captions_table
         table.blockSignals(True)
         table.setRowCount(0)
+        self._caption_rows = {}
         for clip_idx, captions in enumerate(clip_captions):
             for cap_idx, cap in enumerate(captions):
                 row = table.rowCount()
@@ -845,10 +990,13 @@ class WizardWindow(QMainWindow):
                 clip_item = QTableWidgetItem(f"{clip_idx + 1}")
                 time_item = QTableWidgetItem(f"{cap.start:5.1f}–{cap.end:.1f}s")
                 text_item = QTableWidgetItem(cap.text)
+                clip_item.setFlags(clip_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 for item in (clip_item, time_item):
-                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     item.setForeground(Qt.GlobalColor.gray)
-                text_item.setData(Qt.ItemDataRole.UserRole, (clip_idx, cap_idx))
+                time_item.setToolTip("Double-click to change, e.g. 9.6–11.1")
+                for item in (time_item, text_item):
+                    item.setData(Qt.ItemDataRole.UserRole, (clip_idx, cap_idx))
+                self._caption_rows[(clip_idx, cap_idx)] = row
                 table.setItem(row, 0, clip_item)
                 table.setItem(row, 1, time_item)
                 table.setItem(row, 2, text_item)
@@ -856,7 +1004,12 @@ class WizardWindow(QMainWindow):
 
     def _on_caption_edited(self, item: QTableWidgetItem) -> None:
         key = item.data(Qt.ItemDataRole.UserRole)
-        if item.column() != 2 or not key:
+        if not key:
+            return
+        if item.column() == 1:
+            self._on_caption_time_edited(key, item.text())
+            return
+        if item.column() != 2:
             return
         clip_idx, cap_idx = key
         captions = self._project.clip_captions[clip_idx]
@@ -864,8 +1017,127 @@ class WizardWindow(QMainWindow):
         text = item.text().strip()
         if text == old.text:
             return
-        captions[cap_idx] = Caption(old.start, old.end, text, old.words)
+        tokens = text.split()
+        max_words = max(1, self._selected_caption_style().max_words)
+        if len(tokens) <= max_words:
+            captions[cap_idx] = Caption(old.start, old.end, text, old.words)
+            self._render_caption_preview()
+            return
+        # Too many words for one caption (e.g. typed-in missing words): split like the
+        # transcription does, sharing the line's time by word.
+        step = (old.end - old.start) / len(tokens)
+        parts = [
+            Caption(old.start + k * step, old.start + min(len(tokens), k + max_words) * step, " ".join(tokens[k : k + max_words]))
+            for k in range(0, len(tokens), max_words)
+        ]
+        captions[cap_idx : cap_idx + 1] = parts
+        QTimer.singleShot(0, lambda: self._refresh_caption_rows((clip_idx, cap_idx)))
+
+    def _on_caption_time_edited(self, key: tuple[int, int], text: str) -> None:
+        clip_idx, cap_idx = key
+        captions = self._project.clip_captions[clip_idx]
+        cap = captions[cap_idx]
+        match = _CAPTION_TIME_RE.match(text)
+        low = captions[cap_idx - 1].end if cap_idx > 0 else 0.0
+        high = captions[cap_idx + 1].start if cap_idx + 1 < len(captions) else self._clip_duration(clip_idx)
+        start, end = (float(match.group(1)), float(match.group(2))) if match else (cap.start, cap.end)
+        problem = None
+        if not match:
+            problem = "Type the time as start–end in seconds, e.g. 9.6–11.1."
+        elif end - start < 0.2:
+            problem = "The end must be after the start."
+        elif start < low - 0.05 or end > high + 0.05:
+            problem = f"That overlaps the next or previous caption. This one can use {low:.1f}–{high:.1f}s."
+        if problem is None and (round(start, 2), round(end, 2)) != (round(cap.start, 2), round(cap.end, 2)):
+            # Whisper's word timings no longer fit; the highlight is spread over the new span.
+            captions[cap_idx] = Caption(start, end, cap.text)
+        # Rewrite the cell (normalised, or reverted) after Qt finishes the edit.
+        QTimer.singleShot(0, lambda: self._refresh_caption_rows(key))
+        if problem:
+            QMessageBox.warning(self, "Wordly", problem)
+
+    def _clip_duration(self, clip_idx: int) -> float:
+        if self._caption_clip_idx == clip_idx and self._caption_player.duration_seconds() > 0:
+            return self._caption_player.duration_seconds()
+        try:
+            return ffprobe_duration_seconds(self._project.clip_paths[clip_idx])
+        except Exception:  # noqa: BLE001 - unknown length: don't block the edit
+            return float("inf")
+
+    def _refresh_caption_rows(self, select: tuple[int, int] | None = None, *, edit_text: bool = False) -> None:
+        self._fill_captions_table(self._project.clip_captions)
+        table = self._captions_table
+        row = self._caption_rows.get(select) if select else None
+        if row is not None:
+            table.blockSignals(True)  # select without jumping playback
+            table.setCurrentCell(row, 2)
+            table.blockSignals(False)
+            table.scrollToItem(table.item(row, 2))
+            if edit_text:
+                table.setFocus()
+                table.editItem(table.item(row, 2))
+        self._captions_status.setText(self._captions_status_text())
         self._render_caption_preview()
+        self._update_nav()
+
+    def _new_caption_slot(self) -> tuple[int, int, float, float] | None:
+        """Where a new caption goes: the gap at the paused playhead, else after the selected line."""
+        all_caps = self._project.clip_captions
+        if self._caption_clip_idx is not None and self._caption_clip_idx < len(all_caps):
+            clip_idx = self._caption_clip_idx
+            caps = all_caps[clip_idx]
+            t = self._caption_player.position_seconds()
+            if not any(c.start <= t < c.end for c in caps):
+                index = sum(1 for c in caps if c.start <= t)
+                low = caps[index - 1].end if index > 0 else 0.0
+                high = caps[index].start if index < len(caps) else self._clip_duration(clip_idx)
+                start = max(low, t - 0.3)
+                end = min(high, start + 3.0)
+                if end - start >= 0.2:
+                    return clip_idx, index, start, end
+        item = self._captions_table.item(self._captions_table.currentRow(), 2)
+        key = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if not key:
+            nonempty = [i for i, caps in enumerate(all_caps) if caps]
+            if not nonempty:
+                return (0, 0, 0.0, 3.0) if all_caps else None
+            key = (nonempty[0], len(all_caps[nonempty[0]]) - 1)
+        clip_idx, cap_idx = key
+        caps = all_caps[clip_idx]
+        cur = caps[cap_idx]
+        high = caps[cap_idx + 1].start if cap_idx + 1 < len(caps) else self._clip_duration(clip_idx)
+        if high - cur.end >= 0.3:
+            return clip_idx, cap_idx + 1, cur.end, min(high, cur.end + 3.0)
+        # No gap after it: share the selected caption's time.
+        mid = (cur.start + cur.end) / 2
+        caps[cap_idx] = Caption(cur.start, mid, cur.text)
+        return clip_idx, cap_idx + 1, mid, cur.end
+
+    def _insert_caption_line(self) -> None:
+        if not self._project.captions_current():
+            return
+        slot = self._new_caption_slot()
+        if slot is None:
+            return
+        clip_idx, index, start, end = slot
+        self._caption_player.pause()
+        self._project.clip_captions[clip_idx].insert(index, Caption(start, end, ""))
+        self._refresh_caption_rows((clip_idx, index), edit_text=True)
+
+    def _delete_caption_line(self) -> None:
+        item = self._captions_table.item(self._captions_table.currentRow(), 2)
+        key = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if not key or not self._project.captions_current():
+            return
+        clip_idx, cap_idx = key
+        captions = self._project.clip_captions[clip_idx]
+        del captions[cap_idx]
+        self._live_caption = None
+        if captions:
+            select = (clip_idx, min(cap_idx, len(captions) - 1))
+        else:
+            select = None
+        self._refresh_caption_rows(select)
 
     def _start_transcription(self, *, advance_to: int | None = None) -> None:
         clips = [p for p in self._project.clip_paths if p.exists()]
@@ -1239,6 +1511,8 @@ class WizardWindow(QMainWindow):
     def _on_step_changed(self, index: int) -> None:
         if self._last_step_index == S_HIGHLIGHTS and index != S_HIGHLIGHTS:
             self._preview.stop()
+        if self._last_step_index == S_CAPTIONS and index != S_CAPTIONS:
+            self._caption_player.stop()
         if self._last_step_index == S_VERSE_MUSIC and index != S_VERSE_MUSIC:
             self._music_player.stop()
         if index == S_VERSE_MUSIC:
