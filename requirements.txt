@@ -1,3 +1,11 @@
 # Python 3.12+ required
 PySide6>=6.6.0
 yt-dlp>=2024.1.0
+# Auto captions (optional): mlx-whisper on Apple Silicon, faster-whisper elsewhere
+mlx-whisper>=0.4; sys_platform == "darwin" and platform_machine == "arm64"
+faster-whisper>=1.0
+# Reel layout: follow the speaker (Apple Vision, macOS) and crop frames
+pyobjc-framework-Vision>=10; sys_platform == "darwin"
+numpy>=1.24
+# Find highlights: Claude picks the sermon highlights (needs an Anthropic API key)
+anthropic>=0.125
