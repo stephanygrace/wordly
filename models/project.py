@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from utils.export_name import default_export_project_name
+
+if TYPE_CHECKING:
+    from services.transcribe import Caption
 
 
 @dataclass
@@ -44,7 +47,7 @@ class MusicChoice:
 
 @dataclass
 class ProjectState:
-    """Mutable wizard state carried across all nine steps."""
+    """Mutable wizard state carried across all steps."""
 
     fb_url: str = ""
     cookies_file: Optional[Path] = None
@@ -53,8 +56,7 @@ class ProjectState:
     segments: list[ClipSegment] = field(default_factory=list)
     # Individual exported clips (Clip001.mp4, Clip002.mp4, …) — primary storage.
     clip_paths: list[Path] = field(default_factory=list)
-    # Single merged clip kept for Filmora template export; set to clip_paths[0]
-    # when no merge is performed, or to the concat output when merge is used.
+    # Optional single-clip fallback when only one reel is produced.
     joined_clip_path: Optional[Path] = None
     theme: str = ""
     verse_choices: list[VerseChoice] = field(default_factory=list)
@@ -62,4 +64,17 @@ class ProjectState:
     music_choices: list[MusicChoice] = field(default_factory=list)
     selected_music: Optional[MusicChoice] = None
     project_name: str = field(default_factory=default_export_project_name)
-    wfp_output_path: Optional[Path] = None
+    resolve_output_path: Optional[Path] = None
+    # Transcribe clips with Whisper and add caption titles to the Resolve timeline.
+    auto_captions: bool = False
+    # Reviewed captions per clip (times relative to each clip), from the Captions step.
+    clip_captions: list[list["Caption"]] = field(default_factory=list)
+    # Clip files the captions were made from; captions are stale if clip_paths changes.
+    captions_source: list[Path] = field(default_factory=list)
+    # Caption look (name from assets/caption_styles.json); None = default style.
+    caption_style: Optional[str] = None
+    # Sermon-reel layout: blurred background, video centred, verse block above it.
+    reel_layout: bool = True
+
+    def captions_current(self) -> bool:
+        return bool(self.clip_captions) and self.captions_source == list(self.clip_paths)

@@ -1,12 +1,11 @@
-import json
 import unittest
-import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from models.project import ClipSegment, MusicChoice, ProjectState, VerseChoice
+from models.project import MusicChoice, ProjectState, VerseChoice
 from services.ai_assistant import suggest_bible_verses, suggest_instrumentals
-from services.wfp_generator import build_layers, generate_wfp
+from services.resolve_export import generate_resolve_project
 
 
 class TestAiAssistant(unittest.TestCase):
@@ -22,35 +21,30 @@ class TestAiAssistant(unittest.TestCase):
         self.assertTrue(songs[0].search_query)
 
 
-class TestWfpGenerator(unittest.TestCase):
-    def test_generate_wfp_creates_zip_layers(self) -> None:
+class TestResolvePipeline(unittest.TestCase):
+    def test_generate_resolve_project_smoke(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            joined = root / "joined.mp4"
-            joined.write_bytes(b"\x00" * 128)
+            clip = root / "joined.mp4"
+            clip.write_bytes(b"\x00" * 128)
             music = root / "bed.mp3"
             music.write_bytes(b"\x00" * 128)
 
             project = ProjectState(
+                reel_layout=False,
                 project_name="test-project",
-                joined_clip_path=joined,
+                joined_clip_path=clip,
                 selected_verse=VerseChoice("John 3:16", "For God so loved the world."),
                 selected_music=MusicChoice("Calm Piano", local_path=music),
                 theme="love",
             )
 
-            # ffprobe won't work on dummy bytes; stub layers directly for zip structure test.
-            layers = build_layers(project)
-            self.assertEqual(len(layers), 3)
-
-            out = generate_wfp(project, output_path=root / "demo.wfp")
+            with patch("services.resolve_export._safe_duration", return_value=3.0):
+                with patch("services.resolve_export.subprocess.run"):
+                    out = generate_resolve_project(project, output_dir=root / "out")
             self.assertTrue(out.exists())
-            with zipfile.ZipFile(out) as zf:
-                names = zf.namelist()
-                self.assertIn("ProjectFolder/project_info.json", names)
-                self.assertIn("ProjectFolder/Medias/medias_info.json", names)
-                project_info = json.loads(zf.read("ProjectFolder/project_info.json"))
-                self.assertEqual(project_info.get("project_editor_create_version"), "14.2.9.11061")
+            self.assertEqual(out.suffix, ".fcpxml")
+            self.assertTrue((root / "out" / "media" / "Clip001.mp4").exists())
 
 
 if __name__ == "__main__":
