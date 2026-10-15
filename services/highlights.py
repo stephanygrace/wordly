@@ -89,11 +89,30 @@ def format_clock(seconds: float) -> str:
 
 
 def format_timecode(seconds: float) -> str:
-    """HH:MM:SS.ss for the wizard's segment fields."""
-    seconds = max(0.0, seconds)
-    h, rem = divmod(seconds, 3600)
+    """HH:MM:SS for the wizard's segment fields (cuts are whole seconds)."""
+    total = max(0, int(round(seconds)))
+    h, rem = divmod(total, 3600)
     m, s = divmod(rem, 60)
-    return f"{int(h):02d}:{int(m):02d}:{s:05.2f}"
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def whole_second_start(first_word: float, earliest: float = 0.0) -> float:
+    """Whole-second cut just before *first_word*, not before *earliest* (the previous words) if possible."""
+    for t in (math.floor(first_word - LEAD_IN_S), math.floor(first_word)):
+        if t >= earliest:
+            return float(max(0, t))
+    # The gap is under a second: take whichever second overlaps less.
+    before, after = math.floor(first_word), math.ceil(first_word)
+    return float(max(0, before if earliest - before <= after - first_word else after))
+
+
+def whole_second_end(last_word_end: float, latest: float = math.inf) -> float:
+    """Whole-second cut just after *last_word_end*, not after *latest* (the next words) if possible."""
+    for t in (math.ceil(last_word_end + TAIL_S), math.ceil(last_word_end)):
+        if t <= latest:
+            return float(t)
+    after, before = math.ceil(last_word_end), math.floor(last_word_end)
+    return float(after if after - latest <= last_word_end - before else before)
 
 
 # --- 1. Transcript ------------------------------------------------------------
@@ -337,8 +356,8 @@ def build_plan(data: dict, sents: list[Sentence]) -> HighlightPlan:
         # Breathing room, but never into the neighbouring sentences' words.
         before = by_index.get(chosen[0].index - 1)
         after = by_index.get(chosen[-1].index + 1)
-        start = max(0.0, chosen[0].start - LEAD_IN_S, before.end + 0.02 if before else 0.0)
-        end = min(chosen[-1].end + TAIL_S, after.start - 0.02 if after else float("inf"))
+        start = whole_second_start(chosen[0].start, before.end + 0.02 if before else 0.0)
+        end = whole_second_end(chosen[-1].end, after.start - 0.02 if after else math.inf)
         if end - start < MIN_CLIP_S:
             notes.append(f"Skipped “{raw.get('title', '')}” (too short).")
             continue
@@ -355,9 +374,9 @@ def build_plan(data: dict, sents: list[Sentence]) -> HighlightPlan:
         longest = max(range(len(picked)), key=lambda k: picked[k].duration)
         h = picked[longest]
         inside = [s for s in sents if h.start <= s.start and s.end <= h.end + 0.01]
-        if len(inside) > 1 and inside[-1].start - 0.02 - h.start >= MIN_CLIP_S:
-            # End just before the dropped sentence (with breathing room up to its start).
-            new_end = min(inside[-2].end + TAIL_S, inside[-1].start - 0.02)
+        new_end = whole_second_end(inside[-2].end, inside[-1].start - 0.02) if len(inside) > 1 else 0.0
+        if len(inside) > 1 and h.start < new_end < h.end and new_end - h.start >= MIN_CLIP_S:
+            # End just before the dropped sentence.
             picked[longest] = Highlight(h.start, new_end, h.title, h.reason)
         else:
             notes.append(f"Dropped “{picked[-1].title}” to stay within {MAX_TOTAL_S:.0f} s.")

@@ -30,7 +30,7 @@ class TestFindHighlightsInWizard(unittest.TestCase):
 
         plan = HighlightPlan(
             highlights=[
-                Highlight(3010.25, 3048.5, "Ang plano ng Diyos", "core message"),
+                Highlight(3010.0, 3048.0, "Ang plano ng Diyos", "core message"),
                 Highlight(4321.0, 4368.0, "Joseph forgives", "story"),
             ],
             verse_reference="Genesis 50:20",
@@ -54,7 +54,7 @@ class TestFindHighlightsInWizard(unittest.TestCase):
             segments = [(s.start_text, s.end_text, s.label) for s in window._project.segments]
             self.assertEqual(
                 segments,
-                [("00:50:10.25", "00:50:48.50", "Ang plano ng Diyos"), ("01:12:01.00", "01:12:48.00", "Joseph forgives")],
+                [("00:50:10", "00:50:48", "Ang plano ng Diyos"), ("01:12:01", "01:12:48", "Joseph forgives")],
             )
             self.assertEqual(window._segment_list.count(), 2)
             self.assertEqual(window._verse_ref_edit.text(), "Genesis 50:20")

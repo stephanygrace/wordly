@@ -17,7 +17,7 @@ class TimecodeLineEdit(QLineEdit):
         if self._formatting:
             return
         if "." in text:
-            # Fractional seconds (e.g. Claude's 00:50:10.25) are kept as typed.
+            # Fractional seconds typed by hand (e.g. 00:50:10.25) are kept as typed.
             return
 
         cursor_from_end = len(text) - self.cursorPosition()

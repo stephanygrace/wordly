@@ -23,13 +23,14 @@ from PySide6.QtWidgets import (
 from services.ffmpeg_frame import extract_preview_frame
 from utils.console_log import log_info, log_warn
 from utils.preview_target import PreviewDimensions, preview_target_dimensions
-from utils.timecode import format_timecode
 
 
 def _format_ms_as_timecode(ms: int) -> str:
-    if ms < 0:
-        ms = 0
-    return format_timecode(ms / 1000.0)
+    """HH:MM:SS for the player clock (whole seconds, like a video player)."""
+    seconds = max(0, int(ms) // 1000)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 def _running_on_wsl() -> bool:

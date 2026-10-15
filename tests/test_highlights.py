@@ -79,17 +79,18 @@ class TestBuildPlan(unittest.TestCase):
         plan = build_plan(data, sents)
         self.assertEqual([h.title for h in plan.highlights], ["Story", "Ang plano ng Diyos"])
         first = plan.highlights[0]
-        # Padded, but capped just short of the neighbouring sentences (0.3 s apart here).
-        self.assertAlmostEqual(first.start, max(sents[2].start - hl.LEAD_IN_S, sents[1].end + 0.02))
-        self.assertAlmostEqual(first.end, min(sents[4].end + hl.TAIL_S, sents[5].start - 0.02))
+        # Whole seconds, as close to the neighbouring sentences (0.3 s apart here) as allowed.
+        self.assertEqual(first.start, hl.whole_second_start(sents[2].start, sents[1].end + 0.02))
+        self.assertEqual(first.end, hl.whole_second_end(sents[4].end, sents[5].start - 0.02))
+        self.assertTrue(all(h.start.is_integer() and h.end.is_integer() for h in plan.highlights))
         self.assertLessEqual(plan.total_s, hl.MAX_TOTAL_S)
         self.assertEqual(plan.verse_reference, "Genesis 50:20")
 
     def test_long_highlight_is_shortened_from_the_end(self) -> None:
         sents = _sents([10] * 20)
         plan = build_plan({"highlights": [{"start_sentence": 1, "end_sentence": 12, "title": "t", "reason": "r"}]}, sents)
-        self.assertLessEqual(plan.highlights[0].duration, hl.MAX_CLIP_S + hl.LEAD_IN_S + hl.TAIL_S)
-        self.assertAlmostEqual(plan.highlights[0].start, sents[0].start - hl.LEAD_IN_S)
+        self.assertLessEqual(plan.highlights[0].duration, hl.MAX_CLIP_S + 2)
+        self.assertEqual(plan.highlights[0].start, hl.whole_second_start(sents[0].start))
 
     def test_total_kept_within_two_minutes(self) -> None:
         sents = _sents([10] * 40)
@@ -127,8 +128,8 @@ class TestBuildPlan(unittest.TestCase):
         sents[4] = Sentence(5, sents[4].start, sents[4].end, "So,")
         plan = build_plan({"highlights": [{"start_sentence": 1, "end_sentence": 5, "title": "t", "reason": "r"}]}, sents)
         h = plan.highlights[0]
-        self.assertAlmostEqual(h.start, max(sents[1].start - hl.LEAD_IN_S, sents[0].end + 0.02))
-        self.assertAlmostEqual(h.end, min(sents[3].end + hl.TAIL_S, sents[4].start - 0.02))
+        self.assertEqual(h.start, hl.whole_second_start(sents[1].start, sents[0].end + 0.02))
+        self.assertEqual(h.end, hl.whole_second_end(sents[3].end, sents[4].start - 0.02))
 
     def test_never_more_than_three(self) -> None:
         sents = _sents([5] * 60)
@@ -204,14 +205,25 @@ class TestFindHighlights(unittest.TestCase):
                                       progress_cb=lambda r, _m: steps.append(r))
         self.assertEqual((plan.sermon_start, plan.sermon_end), (1200.0, 3600.0))
         self.assertEqual([h.title for h in plan.highlights], ["one", "two"])
-        self.assertAlmostEqual(
-            plan.highlights[0].start, max(sermon[9].start - hl.LEAD_IN_S, sermon[8].end + 0.02)
-        )
+        self.assertEqual(plan.highlights[0].start, hl.whole_second_start(sermon[9].start, sermon[8].end + 0.02))
         self.assertEqual(steps, sorted(steps))
 
     def test_format_timecode_for_wizard(self) -> None:
-        self.assertEqual(hl.format_timecode(3000.5), "00:50:00.50")
-        self.assertEqual(hl.format_timecode(4323.754), "01:12:03.75")
+        self.assertEqual(hl.format_timecode(3000.0), "00:50:00")
+        self.assertEqual(hl.format_timecode(4323.754), "01:12:04")
+
+    def test_whole_second_cuts_stay_in_the_silence(self) -> None:
+        # Room in the gap: a whole second with a little lead-in / tail.
+        self.assertEqual(hl.whole_second_start(100.4, 98.0), 100.0)
+        self.assertEqual(hl.whole_second_start(100.1, 98.0), 99.0)
+        self.assertEqual(hl.whole_second_end(130.2, 133.0), 131.0)
+        self.assertEqual(hl.whole_second_end(130.8, 133.0), 132.0)
+        # Gap shorter than a second: overlap whichever side least.
+        self.assertEqual(hl.whole_second_start(100.9, 100.7), 101.0)  # clips 0.1 s instead of 0.7 s of the last word
+        self.assertEqual(hl.whole_second_start(100.2, 100.1), 100.0)
+        self.assertEqual(hl.whole_second_end(130.2, 130.4), 130.0)
+        self.assertEqual(hl.whole_second_end(130.8, 130.9), 131.0)
+
 
 
 if __name__ == "__main__":
