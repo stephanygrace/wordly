@@ -232,6 +232,13 @@ def stylesheet() -> str:
     }}
     QTableCornerButton::section {{ background-color: {SURFACE_RAISED}; border: none; }}
 
+    QTabBar#ClipTabs::tab {{
+        background-color: transparent; color: {MUTED}; border: 1px solid {BORDER};
+        border-radius: 8px; padding: 5px 12px; margin-right: 6px; font-size: 12px; font-weight: 600;
+    }}
+    QTabBar#ClipTabs::tab:selected {{ background-color: {ACCENT_SOFT}; color: {TEXT}; border-color: {ACCENT}; }}
+    QTabBar#ClipTabs::tab:hover:!selected {{ background-color: {SURFACE_RAISED}; color: {TEXT}; }}
+
     /* --- Summary rows (Export) ------------------------------------------ */
     QFrame#SummaryRow {{ border-bottom: 1px solid {BORDER}; }}
     QLabel#SummaryKey {{ font-size: 12px; font-weight: 600; color: {MUTED}; }}
