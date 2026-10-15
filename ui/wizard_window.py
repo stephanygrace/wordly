@@ -757,7 +757,8 @@ class WizardWindow(QMainWindow):
         toggle_card.body.addWidget(label(backend_text, "Muted", wrap=True))
         layout.addWidget(toggle_card)
 
-        row, (left, right) = self._columns(2, 3)
+        # Transcript first, the clip preview beside it on the right.
+        row, (left, right) = self._columns(3, 2)
         layout.addWidget(row)
 
         try:
@@ -802,8 +803,8 @@ class WizardWindow(QMainWindow):
                 wrap=True,
             )
         )
-        left.addWidget(self._style_card)
-        left.addStretch(1)
+        right.addWidget(self._style_card)
+        right.addStretch(1)
 
         self._transcript_card = Card("Transcript")
         self._transcribe_btn = button("Transcribe", "PrimarySmall", on_click=lambda: self._start_transcription())
@@ -840,7 +841,7 @@ class WizardWindow(QMainWindow):
         )
         self._caption_player.attach_space_shortcut(page)
         self._transcript_card.body.addWidget(self._captions_table)
-        right.addWidget(self._transcript_card)
+        left.addWidget(self._transcript_card)
 
         self._render_caption_preview()
         return page
