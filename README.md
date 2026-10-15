@@ -1,11 +1,11 @@
 # Wordly
 
-Desktop wizard for church media teams: download a Facebook or YouTube sermon (or open a local file), let Claude find the highlights or trim them by hand, add captions, pick a Bible verse and instrumental, and export a vertical sermon reel as a **DaVinci Resolve Free** import bundle (FCPXML + media).
+Desktop wizard for church media teams: download a Facebook or YouTube sermon (or open a local file), let Lux (Claude Opus) find the highlights or trim them by hand, add captions, pick a Bible verse and instrumental, and export a vertical sermon reel as a **DaVinci Resolve Free** import bundle (FCPXML + media).
 
 ## Workflow
 
 1. **Download** — paste a Facebook or YouTube URL, or open a local sermon video
-2. **Timestamps** — add start/end ranges, or click **Find highlights with Claude** to transcribe the service and pick 2–3 highlights
+2. **Highlights** — add start/end ranges by hand, or click **Find sermon** (free, no API key) to skip the opening songs and add the sermon as one clip, then **Let Lux pick highlights** to choose 2–3 highlights from inside your clips (or from the whole video when there are none)
 3. **Preview** — scrub each segment; Next exports `Clip001.mp4`, … (VP9/AV1/HEVC sources are re-encoded so they edit smoothly)
 4. **Captions** — optionally transcribe the clips with Whisper, review the text, and pick a caption style
 5. **Verse & music** — enter the verse; download or choose an instrumental
@@ -17,7 +17,7 @@ Desktop wizard for church media teams: download a Facebook or YouTube sermon (or
 - **FFmpeg / ffprobe** on `PATH`
 - **DaVinci Resolve Free** to import the FCPXML and Deliver an MP4
 - **Optional:** [aria2c](https://aria2.github.io/) — faster Facebook downloads when detected
-- **Optional:** `ANTHROPIC_API_KEY` — **Find highlights with Claude**
+- **Optional:** `ANTHROPIC_API_KEY` — **Let Lux pick highlights**
 - **Optional:** `OPENAI_API_KEY` — smarter verse and instrumental suggestions
 
 Python dependencies (`requirements.txt`) include Whisper for captions (`mlx-whisper` on Apple Silicon, `faster-whisper` elsewhere), Apple Vision for speaker tracking in the reel layout (macOS only), and the `anthropic` SDK.
