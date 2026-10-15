@@ -806,7 +806,7 @@ class WizardWindow(QMainWindow):
         left.addStretch(1)
 
         self._transcript_card = Card("Transcript")
-        self._transcribe_btn = button("Transcribe", "Small", on_click=lambda: self._start_transcription())
+        self._transcribe_btn = button("Transcribe", "PrimarySmall", on_click=lambda: self._start_transcription())
         self._insert_caption_btn = button(
             "＋ Insert line",
             "Small",

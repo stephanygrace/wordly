@@ -186,7 +186,17 @@ def stylesheet() -> str:
     }}
     QPushButton#Ghost:hover, QToolButton#Ghost:hover {{ background-color: {SURFACE_RAISED}; color: {TEXT}; }}
     QPushButton#Ghost:disabled {{ background-color: transparent; color: {FAINT}; }}
-    QPushButton#Small, QPushButton#Danger {{ padding: 4px 10px; font-size: 12px; border-radius: 7px; }}
+    QPushButton#Small, QPushButton#Danger, QPushButton#PrimarySmall {{
+        padding: 4px 10px; font-size: 12px; border-radius: 7px;
+    }}
+    /* The main action in a card header, sized like the small buttons beside it. */
+    QPushButton#PrimarySmall {{
+        background-color: {ACCENT}; border-color: {ACCENT}; color: #ffffff; font-weight: 600;
+    }}
+    QPushButton#PrimarySmall:hover {{ background-color: {ACCENT_HOVER}; border-color: {ACCENT_HOVER}; }}
+    QPushButton#PrimarySmall:disabled {{
+        background-color: #2a2f4a; border-color: #2a2f4a; color: #7c84a8;
+    }}
     QPushButton#Danger {{ background-color: transparent; color: {MUTED}; }}
     QPushButton#Danger:hover:enabled {{ border-color: {DANGER}; color: {DANGER}; background-color: {DANGER_SOFT}; }}
     QPushButton#Link {{
