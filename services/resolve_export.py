@@ -272,7 +272,7 @@ def _add_caption_titles(
 
 
 # Background song level under the sermon audio.
-MUSIC_GAIN_DB = -15.0
+MUSIC_GAIN_DB = -10.0
 
 # Captions use lanes 1-2; the verse sits above them.
 VERSE_LANE = 3

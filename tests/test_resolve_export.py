@@ -296,8 +296,8 @@ class TestGenerateResolveProject(unittest.TestCase):
             )
             self.assertIsNone(root_el.find("./resources/format[@name='FFVideoFormatRateUndefined']"))
             self.assertEqual(connected["Instrumental"].get("lane"), "-2")
-            # Background song sits 15 dB down, as an editable clip volume.
-            self.assertEqual(connected["Instrumental"].find("adjust-volume").get("amount"), "-15dB")
+            # Background song sits 10 dB down, as an editable clip volume.
+            self.assertEqual(connected["Instrumental"].find("adjust-volume").get("amount"), "-10dB")
             assets = {a.get("id"): a for a in root_el.findall("./resources/asset")}
             self.assertTrue(assets[bg.get("ref")].get("src").endswith("media/Background.mp4"))
             # The spine uses the zoomed head-to-waist render, which keeps the audio.
