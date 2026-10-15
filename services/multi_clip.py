@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
 import time
@@ -9,7 +10,7 @@ from typing import Callable, Optional
 
 from models.project import ClipSegment
 from services.trimmer import parse_trim_times
-from utils.ffmpeg_paths import require_ffmpeg
+from utils.ffmpeg_paths import find_ffprobe, require_ffmpeg
 from utils.ffmpeg_progress import parse_ffmpeg_progress_seconds
 from utils.subprocess_win import background_creationflags
 
@@ -190,6 +191,40 @@ def _output_looks_valid(output_path: Path, expected_duration_s: float) -> bool:
     return size >= max(32_000, expected_duration_s * 375)
 
 
+def _source_video_codec(video_path: Path) -> str:
+    """Best-effort primary video codec name from ffprobe (empty if unknown)."""
+    ffprobe = find_ffprobe()
+    if not ffprobe:
+        return ""
+    cmd = [
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_name",
+        "-of",
+        "json",
+        str(video_path),
+    ]
+    try:
+        out = subprocess.check_output(cmd, text=True)
+        data = json.loads(out)
+        streams = data.get("streams") or []
+        if streams:
+            return str(streams[0].get("codec_name") or "").strip().lower()
+    except Exception:
+        return ""
+    return ""
+
+
+def _prefer_reencode_for_editing(video_path: Path) -> bool:
+    """True when source codec is known to be sluggish in NLE timelines."""
+    codec = _source_video_codec(video_path)
+    return codec in {"vp8", "vp9", "av1", "hevc", "h265"}
+
+
 def export_segment_clip(
     sermon_path: Path,
     segment: ClipSegment,
@@ -202,9 +237,13 @@ def export_segment_clip(
     start_s, end_s = spec.start_seconds, spec.end_seconds
     duration_s = spec.duration_seconds
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    prefer_reencode = _prefer_reencode_for_editing(sermon_path)
 
     if progress_cb:
-        progress_cb(-1.0, f"Trimming {segment.display_name}…")
+        if prefer_reencode:
+            progress_cb(-1.0, f"Preparing edit-friendly encode for {segment.display_name}…")
+        else:
+            progress_cb(-1.0, f"Trimming {segment.display_name}…")
 
     copy_cmd = _build_copy_cmd(
         sermon_path,
@@ -213,19 +252,20 @@ def export_segment_clip(
         output_path=output_path,
     )
 
-    copy_failed = False
-    try:
-        _run_ffmpeg(
-            copy_cmd,
-            total_duration_s=duration_s,
-            progress_cb=progress_cb,
-            should_cancel=should_cancel,
-            status=f"Clip {segment.display_name}",
-        )
-    except RuntimeError as exc:
-        if "Cancelled" in str(exc):
-            raise
-        copy_failed = True
+    copy_failed = prefer_reencode
+    if not prefer_reencode:
+        try:
+            _run_ffmpeg(
+                copy_cmd,
+                total_duration_s=duration_s,
+                progress_cb=progress_cb,
+                should_cancel=should_cancel,
+                status=f"Clip {segment.display_name}",
+            )
+        except RuntimeError as exc:
+            if "Cancelled" in str(exc):
+                raise
+            copy_failed = True
 
     if not copy_failed and _output_looks_valid(output_path, duration_s):
         if progress_cb:
@@ -311,3 +351,112 @@ def export_clips(
         progress_cb(1.0, f"Done — exported {n_label}")
 
     return clip_paths
+
+
+def _write_concat_list_file(list_path: Path, clip_paths: list[Path]) -> None:
+    lines: list[str] = []
+    for p in clip_paths:
+        # concat demuxer expects: file '/abs/path'
+        # Escape single quotes for ffmpeg concat syntax.
+        s = str(p.resolve()).replace("'", r"'\''")
+        lines.append(f"file '{s}'")
+    list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def merge_clips(
+    clip_paths: list[Path],
+    output_path: Path,
+    *,
+    progress_cb: Optional[ProgressCallback] = None,
+    should_cancel: Optional[ShouldCancel] = None,
+) -> Path:
+    """Merge already-trimmed clips into a single highlights video."""
+    if not clip_paths:
+        raise ValueError("No clips to merge.")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Fast path: concat demuxer + stream copy.
+    # Falls back to re-encode when sources are not bitstream-compatible.
+    list_file = output_path.with_suffix(".concat.txt")
+    _write_concat_list_file(list_file, clip_paths)
+
+    if progress_cb:
+        progress_cb(-1.0, "Merging clips…")
+
+    copy_cmd = [
+        _ffmpeg(),
+        *_FFMPEG_GLOBAL,
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_file),
+        "-c",
+        "copy",
+        str(output_path),
+    ]
+    try:
+        # Unknown overall duration; still show heartbeat progress.
+        _run_ffmpeg(
+            copy_cmd,
+            total_duration_s=60.0,
+            progress_cb=progress_cb,
+            should_cancel=should_cancel,
+            status="Merging",
+        )
+        if progress_cb:
+            progress_cb(1.0, f"Done — merged to {output_path.name}")
+        return output_path.resolve()
+    except RuntimeError as exc:
+        if "Cancelled" in str(exc):
+            raise
+        # Re-encode fallback (still uses concat demuxer).
+        if output_path.is_file():
+            try:
+                output_path.unlink()
+            except OSError:
+                pass
+
+    if progress_cb:
+        progress_cb(0.0, "Re-encoding merged video…")
+
+    reencode_cmd = [
+        _ffmpeg(),
+        *_FFMPEG_GLOBAL,
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_file),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        "-threads",
+        "0",
+        str(output_path),
+    ]
+    _run_ffmpeg(
+        reencode_cmd,
+        total_duration_s=120.0,
+        progress_cb=progress_cb,
+        should_cancel=should_cancel,
+        status="Merging",
+    )
+    if progress_cb:
+        progress_cb(1.0, f"Done — merged to {output_path.name}")
+    return output_path.resolve()

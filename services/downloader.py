@@ -5,6 +5,7 @@ import pty
 import re
 import select
 import subprocess
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -19,6 +20,8 @@ ProgressCallback = Callable[[float, str], None]
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _ANSI_OSC_RE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)")
+_FACEBOOK_ID_RE = re.compile(r"(?<!\d)(\d{8,})(?!\d)")
+_PASS_DONE_RE = re.compile(r"^\[download\]\s+100(?:\.0)?% of .* in \d")
 
 _DOWNLOAD_LINE_RE = re.compile(
     r"^\[download\]\s+"
@@ -31,6 +34,16 @@ _DOWNLOAD_LINE_RE = re.compile(
     r"(?P<only_bytes>[\d.]+\s*\w+)\s+at\s+(?P<only_speed>[\d.]+\s*\w+/s)"
     r")"
 )
+
+
+def _source_label(url: str) -> str:
+    """Site name for status messages ("YouTube", "Facebook", or a generic label)."""
+    host = url.lower()
+    if "youtube.com" in host or "youtu.be" in host:
+        return "YouTube"
+    if "facebook.com" in host or "fb.watch" in host:
+        return "Facebook"
+    return "the link"
 
 
 def _clean_ytdlp_line(text: str) -> str:
@@ -252,15 +265,37 @@ def _resolve_downloaded_path(
     return path.resolve()
 
 
+def _existing_download_for_url(url: str, out_dir: Path) -> Path | None:
+    """Return a previous download matching a Facebook numeric id, if present."""
+    ids = sorted(set(_FACEBOOK_ID_RE.findall(url)), key=len, reverse=True)
+    video_exts = {".mp4", ".webm", ".mkv", ".m4v"}
+    for vid in ids:
+        candidates = sorted(out_dir.glob(f"*{vid}*"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for candidate in candidates:
+            if candidate.is_file() and candidate.suffix.lower() in video_exts:
+                return candidate.resolve()
+    return None
+
+
 def _run_subprocess_with_lines(
     cmd: list[str],
     *,
     should_cancel: Optional[ShouldCancel],
     on_line: Callable[[str], None],
+    silence_timeout_s: float | None = None,
+    on_silence: Callable[[float], None] | None = None,
+    silence_progress_s: float | None = None,
 ) -> int:
     """Run *cmd* and invoke *on_line* for each merged stdout/stderr line."""
     if os.name == "nt":
-        return _run_subprocess_with_lines_pipe(cmd, should_cancel=should_cancel, on_line=on_line)
+        return _run_subprocess_with_lines_pipe(
+            cmd,
+            should_cancel=should_cancel,
+            on_line=on_line,
+            silence_timeout_s=silence_timeout_s,
+            on_silence=on_silence,
+            silence_progress_s=silence_progress_s,
+        )
 
     master_fd: int | None = None
     proc: subprocess.Popen[bytes] | None = None
@@ -276,6 +311,8 @@ def _run_subprocess_with_lines(
         os.close(slave_fd)
 
         buffer = ""
+        last_output_at = time.monotonic()
+        last_silence_emit_at = last_output_at
         while True:
             if should_cancel is not None and should_cancel():
                 proc.terminate()
@@ -295,10 +332,27 @@ def _run_subprocess_with_lines(
                     if proc.poll() is not None:
                         break
                     continue
+                last_output_at = time.monotonic()
                 buffer += chunk.decode("utf-8", errors="replace")
                 buffer = _feed_subprocess_buffer(buffer, on_line)
             elif proc.poll() is not None:
                 break
+            else:
+                now = time.monotonic()
+                silent_for = now - last_output_at
+                if (
+                    on_silence is not None
+                    and silence_progress_s is not None
+                    and now - last_silence_emit_at >= silence_progress_s
+                ):
+                    on_silence(silent_for)
+                    last_silence_emit_at = now
+                if silence_timeout_s is not None and silent_for > silence_timeout_s:
+                    proc.terminate()
+                    raise TimeoutError(
+                        "yt-dlp was silent while fetching Facebook video info. "
+                        "Try again, or update yt-dlp/cookies if Facebook is throttling the request."
+                    )
 
         if buffer.strip():
             buffer = _feed_subprocess_buffer(buffer + "\n", on_line)
@@ -321,7 +375,11 @@ def _run_subprocess_with_lines_pipe(
     *,
     should_cancel: Optional[ShouldCancel],
     on_line: Callable[[str], None],
+    silence_timeout_s: float | None = None,
+    on_silence: Callable[[float], None] | None = None,
+    silence_progress_s: float | None = None,
 ) -> int:
+    del on_silence, silence_progress_s  # pipe mode cannot heartbeat while blocked on readline
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -331,6 +389,7 @@ def _run_subprocess_with_lines_pipe(
     )
     try:
         assert proc.stdout is not None
+        last_output_at = time.monotonic()
         for raw_line in proc.stdout:
             if should_cancel is not None and should_cancel():
                 proc.terminate()
@@ -341,9 +400,18 @@ def _run_subprocess_with_lines_pipe(
                 raise DownloadCancelled()
             line = raw_line.rstrip("\r\n")
             if line:
+                last_output_at = time.monotonic()
                 on_line(line)
+            if silence_timeout_s is not None and time.monotonic() - last_output_at > silence_timeout_s:
+                proc.terminate()
+                raise TimeoutError(
+                    "yt-dlp was silent while fetching Facebook video info. "
+                    "Try again, or update yt-dlp/cookies if Facebook is throttling the request."
+                )
     finally:
-        return proc.wait()
+        if proc.poll() is None:
+            proc.wait()
+    return proc.returncode or 0
 
 
 def _download_with_executable(
@@ -359,6 +427,7 @@ def _download_with_executable(
         if progress_cb is not None:
             progress_cb(ratio, msg)
 
+    source = _source_label(url)
     cmd: list[str] = [
         exe,
         "-f",
@@ -370,6 +439,14 @@ def _download_with_executable(
         "--color",
         "never",
         "--newline",
+        # --print implies --quiet, which hides the [download] percentage lines.
+        "--progress",
+        "--socket-timeout",
+        "10",
+        "--retries",
+        "2",
+        "--fragment-retries",
+        "2",
         "--print",
         "after_move:filepath",
     ]
@@ -387,12 +464,20 @@ def _download_with_executable(
 
     lines: list[str] = []
     output_path: Path | None = None
+    # "bv*+ba" downloads video and audio separately, so 0→100% runs once per stream.
+    pass_index = 1
 
     def _on_line(line: str) -> None:
+        nonlocal pass_index
         lines.append(line)
         update = _progress_from_log_line(line)
         if update is not None:
-            _emit(*update)
+            ratio, msg = update
+            if pass_index > 1 and msg.startswith("Downloading — "):
+                msg = f"Downloading (part {pass_index}) — " + msg[len("Downloading — ") :]
+            _emit(ratio, msg)
+            if _PASS_DONE_RE.match(line):
+                pass_index += 1
             return
 
         if line.startswith("[") and "]" in line:
@@ -405,7 +490,25 @@ def _download_with_executable(
             nonlocal output_path
             output_path = candidate
 
-    return_code = _run_subprocess_with_lines(cmd, should_cancel=should_cancel, on_line=_on_line)
+    def _on_silence(silent_for: float) -> None:
+        seconds = int(silent_for)
+        if seconds < 30:
+            _emit(-1.0, f"Still fetching video info from {source}…")
+            return
+        _emit(
+            -1.0,
+            f"Still waiting for {source} video info ({seconds}s). "
+            "This can take a minute; you can cancel and retry if needed.",
+        )
+
+    return_code = _run_subprocess_with_lines(
+        cmd,
+        should_cancel=should_cancel,
+        on_line=_on_line,
+        silence_timeout_s=None,
+        on_silence=_on_silence,
+        silence_progress_s=10,
+    )
 
     if return_code != 0:
         tail = "\n".join(lines[-8:])
@@ -477,7 +580,7 @@ def _download_with_python_api(
             ydl_opts["cookiefile"] = str(cf.resolve())
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        _emit(-1.0, "Fetching video info from Facebook…")
+        _emit(-1.0, f"Fetching video info from {_source_label(url)}…")
         info = ydl.extract_info(url, download=True)
         return _resolve_downloaded_path(info, ydl, out_dir)
 
@@ -496,7 +599,7 @@ def download_facebook_video(
     cookies_file: Optional[Path] = None,
     concurrent_fragments: int = 16,  # kept for API compatibility; ignored
 ) -> Path:
-    """Download a Facebook / Facebook Live video with yt-dlp.
+    """Download a Facebook / Facebook Live / YouTube video with yt-dlp.
 
     Prefers the user's system yt-dlp binary (e.g. ~/bin/yt-dlp from fbdl) when it
     is newer than the packaged module, using the same minimal flags as a plain
@@ -517,10 +620,15 @@ def download_facebook_video(
     exe, backend = _prefer_system_yt_dlp()
 
     _emit(-1.0, "Preparing download…")
+    existing = _existing_download_for_url(url, out_dir)
+    if existing is not None:
+        _emit(1.0, f"Using existing download — {existing.name}")
+        return existing
+
     _emit(-1.0, f"Using {backend}…")
 
     if exe:
-        _emit(-1.0, "Fetching video info from Facebook…")
+        _emit(-1.0, f"Fetching video info from {_source_label(url)}…")
         return _download_with_executable(
             exe,
             url,

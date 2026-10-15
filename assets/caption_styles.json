@@ -1,0 +1,52 @@
+{
+  "_help": "Caption looks for the Captions step. Copy a style, give it a new name and change any field. Colours are #RRGGBB (or #RRGGBBAA). highlight_color colours the word being spoken (null = no highlight). outline_width 0 = no outline; shadow_color null = no shadow. position_y is percent of frame height from centre (negative = lower). max_line_chars wraps longer captions onto two lines. max_words = words per caption (applies when transcribing).",
+  "styles": [
+    {
+      "name": "Sermon reel",
+      "font": "Outfit",
+      "font_face": "Bold",
+      "font_size": 24,
+      "text_color": "#FFFFFF",
+      "highlight_color": "#FFF000",
+      "outline_color": "#000000",
+      "outline_width": 0,
+      "shadow_color": "#000000C0",
+      "shadow_offset": 3,
+      "shadow_blur": 3,
+      "uppercase": true,
+      "position_y": -21.8,
+      "max_line_chars": 23,
+      "max_words": 3
+    },
+    {
+      "name": "Word highlight",
+      "font": "Helvetica Neue",
+      "font_face": "Bold",
+      "font_size": 24,
+      "text_color": "#FFFFFF",
+      "highlight_color": "#FFD400",
+      "outline_color": "#000000",
+      "outline_width": 4,
+      "uppercase": true,
+      "position_y": -25,
+      "max_line_chars": 32,
+      "shadow_color": null,
+      "max_words": 5
+    },
+    {
+      "name": "Clean white",
+      "font": "Helvetica Neue",
+      "font_face": "Bold",
+      "font_size": 24,
+      "text_color": "#FFFFFF",
+      "highlight_color": null,
+      "outline_color": "#000000",
+      "outline_width": 4,
+      "uppercase": false,
+      "position_y": -25,
+      "max_line_chars": 32,
+      "shadow_color": null,
+      "max_words": 5
+    }
+  ]
+}

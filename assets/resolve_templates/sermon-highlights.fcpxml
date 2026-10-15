@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<!--
+  Wordly Resolve Free template marker (FCPXML 1.9).
+
+  Wordly regenerates a full timeline at export time with absolute media paths
+  pointing at exports/<name>/media/Clip00N.mp4 and instrumental.*.
+
+  Author a styled master timeline in Resolve Free (1080×1920 @ 30fps), then
+  optionally replace this file via WORDLY_RESOLVE_TEMPLATE. See
+  docs/TEMPLATE_AUTHORING.md.
+
+  This stub exists so template_available() succeeds out of the box; content
+  below is replaced on each Generate.
+-->
+<fcpxml version="1.9">
+  <resources>
+    <format id="r1" name="FFVideoFormat1080p30" frameDuration="100/3000s" width="1080" height="1920" colorSpace="1-1-1 (Rec. 709)"/>
+  </resources>
+  <library>
+    <event name="Wordly">
+      <project name="sermon-highlights">
+        <sequence format="r1" duration="0s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+          <spine/>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>

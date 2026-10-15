@@ -12,5 +12,5 @@ ASSETS = ROOT / "assets"
 def ensure_directories() -> None:
     for folder in (DOWNLOADS, CLIPS, EXPORTS, TEMP, ASSETS):
         folder.mkdir(parents=True, exist_ok=True)
-    for sub in ("filmora_templates", "music"):
+    for sub in ("resolve_templates", "music"):
         (ASSETS / sub).mkdir(parents=True, exist_ok=True)

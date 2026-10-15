@@ -10,6 +10,7 @@ from PySide6.QtGui import QCursor, QMoveEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -26,22 +27,31 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QInputDialog,
     QVBoxLayout,
     QWidget,
 )
 
 from models.project import ClipSegment, MusicChoice, ProjectState, VerseChoice
 from services.downloader import download_backend_description, download_facebook_video
-from services.multi_clip import export_clips
+from services.multi_clip import export_clips, merge_clips
 from services.music_downloader import AUDIO_EXTENSIONS, download_instrumental
 from services.trimmer import ffprobe_duration_seconds
-from services.filmora_launcher import open_filmora_project
-from services.filmora_template import template_available
-from services.wfp_generator import generate_wfp
-from utils.windows_paths import filmora_host_note
+from services.resolve_export import generate_resolve_project
+from services.resolve_launcher import install_import_script, open_resolve_project, reveal_in_finder
+from services.resolve_template import template_available
+from services.claude_client import MissingApiKey, api_key, save_api_key
+from services.highlights import HighlightPlan, find_highlights, format_clock
+from services.highlights import format_timecode as highlight_timecode
+from services.caption_style import DEFAULT_STYLE_NAME, CaptionStyle, load_caption_styles
+from services.transcribe import Caption, transcribe_clips, whisper_backend_label, whisper_model_name
 from ui.preview_player import PreviewPlayer
 from ui.timecode_edit import TimecodeLineEdit
-from utils.app_settings import KEY_LAST_FB_URL, settings
+from utils.app_settings import KEY_AUTO_CAPTIONS, KEY_CAPTION_STYLE, KEY_LAST_FB_URL, KEY_REEL_LAYOUT, settings
+from utils.fonts import install_fonts_for_resolve, register_bundled_fonts
 from utils.console_log import log_error, log_info, log_progress, log_step, log_warn
 from utils.export_name import default_export_project_name
 from utils.paths import CLIPS, DOWNLOADS, ensure_directories
@@ -198,16 +208,15 @@ class _WslTitleBar(QWidget):
 
 
 class WizardWindow(QMainWindow):
-    """Seven-step production wizard for sermon highlight reels."""
+    """Production wizard for sermon highlight reels."""
 
     _STEP_TITLES = (
         "Download",
         "Timestamps",
         "Preview",
-        "Bible verse",
-        "Instrumental",
-        "Project name",
-        "Export .wfp",
+        "Captions",
+        "Verse & music",
+        "Project",
     )
 
     # Background ffprobe signals (emitted from a daemon thread, consumed on UI thread)
@@ -223,6 +232,11 @@ class WizardWindow(QMainWindow):
         self._project = ProjectState()
         self._thread: QThread | None = None
         self._worker: _JobWorker | None = None
+        # Threads of jobs that were replaced before they had fully stopped. Python
+        # owns job threads and workers (no deleteLater): starting a job right as
+        # the previous one finished used to free a thread Qt was still using and
+        # crashed the app, so threads are only released once really stopped.
+        self._retired_jobs: list[tuple[QThread, _JobWorker | None]] = []
         self._job_on_ok = None
         self._job_on_fail = None
         self._busy = False
@@ -239,10 +253,9 @@ class WizardWindow(QMainWindow):
             self._wrap_step(self._build_download_step()),
             self._wrap_step(self._build_timestamps_step()),
             self._wrap_step(self._build_preview_step()),
-            self._wrap_step(self._build_verse_step()),
-            self._wrap_step(self._build_music_step()),
-            self._wrap_step(self._build_name_step()),
-            self._wrap_step(self._build_export_step()),
+            self._wrap_step(self._build_captions_step()),
+            self._wrap_step(self._build_verse_music_step()),
+            self._wrap_step(self._build_project_export_step()),
         ]
         for widget in self._steps:
             self._stack.addWidget(widget)
@@ -310,6 +323,19 @@ class WizardWindow(QMainWindow):
         self._apply_styles()
         self._apply_pointer_cursors()
         self._restore_prefs()
+        # Resolve only scans its Scripts menu at startup, so install the importer early.
+        try:
+            install_import_script()
+        except Exception as exc:  # noqa: BLE001
+            log_warn("export", f"Could not install Resolve import script: {exc}")
+        # Caption/verse fonts: Qt needs them registered, Resolve needs them installed.
+        try:
+            register_bundled_fonts()
+            newly = install_fonts_for_resolve()
+            if newly:
+                log_step("export", f"Installed fonts for Resolve: {', '.join(p.name for p in newly)} (restart Resolve to use them)")
+        except Exception as exc:  # noqa: BLE001
+            log_warn("export", f"Could not install caption fonts: {exc}")
         self._sermon_probed.connect(self._on_sermon_probed, Qt.ConnectionType.QueuedConnection)
         self._sermon_probe_failed.connect(self._on_sermon_probe_failed, Qt.ConnectionType.QueuedConnection)
         self._update_nav()
@@ -786,12 +812,12 @@ class WizardWindow(QMainWindow):
         layout = QVBoxLayout(w)
         self._configure_step_layout(layout)
 
-        title = QLabel("Paste Facebook URL")
+        title = QLabel("Paste Facebook or YouTube URL")
         title.setObjectName("StepTitle")
         layout.addWidget(title)
 
         self._url_edit = QLineEdit()
-        self._url_edit.setPlaceholderText("https://www.facebook.com/...")
+        self._url_edit.setPlaceholderText("https://www.facebook.com/... or https://youtu.be/...")
 
         self._download_backend_note = QLabel(
             f"Download backend: {download_backend_description()}."
@@ -841,6 +867,23 @@ class WizardWindow(QMainWindow):
         layout.addWidget(self._seg_duration_hint)
         layout.addSpacing(4)
 
+        self._find_highlights_btn = QPushButton("Find highlights with Claude")
+        self._find_highlights_btn.setObjectName("AccentButton")
+        self._find_highlights_btn.setToolTip(
+            "Transcribes the service, finds the sermon and lets Claude pick 2–3 highlights "
+            "(max 2 minutes) plus the Bible verse. You can still edit everything."
+        )
+        self._find_highlights_btn.clicked.connect(self._find_highlights)
+        highlights_row = QHBoxLayout()
+        highlights_row.addWidget(self._find_highlights_btn)
+        highlights_row.addStretch(1)
+        layout.addLayout(highlights_row)
+        self._highlights_summary = QLabel("")
+        self._highlights_summary.setObjectName("MutedHelpLabel")
+        self._highlights_summary.setWordWrap(True)
+        self._highlights_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self._highlights_summary)
+
         segments_box = QGroupBox("Segments")
         segments_box.setObjectName("SegmentListBox")
         segments_layout = QVBoxLayout(segments_box)
@@ -854,9 +897,9 @@ class WizardWindow(QMainWindow):
         layout.addWidget(segments_box, stretch=1)
 
         self._seg_start = TimecodeLineEdit()
-        self._seg_start.setPlaceholderText("00:01:25")
+        self._seg_start.setPlaceholderText("e.g. 1:25:00")
         self._seg_end = TimecodeLineEdit()
-        self._seg_end.setPlaceholderText("00:01:55")
+        self._seg_end.setPlaceholderText("e.g. 1:25:30")
         self._seg_end_30_btn = QPushButton("+30s")
         self._seg_end_30_btn.setObjectName("DurationQuickButton")
         self._seg_end_30_btn.setToolTip("Set end to start + 30 seconds")
@@ -924,6 +967,15 @@ class WizardWindow(QMainWindow):
         actions_row.setSpacing(8)
         actions_row.addWidget(self._add_segment_btn)
         actions_row.addWidget(remove_btn)
+        self._export_trimmed_btn = QPushButton("Export trimmed clips…")
+        self._export_trimmed_btn.setObjectName("AccentButton")
+        self._export_trimmed_btn.clicked.connect(self._export_trimmed_clips_clicked)
+        self._export_merged_btn = QPushButton("Export merged video…")
+        self._export_merged_btn.setObjectName("AccentButton")
+        self._export_merged_btn.clicked.connect(self._export_merged_video_clicked)
+        actions_row.addSpacing(12)
+        actions_row.addWidget(self._export_trimmed_btn)
+        actions_row.addWidget(self._export_merged_btn)
         actions_row.addStretch(1)
         add_layout.addLayout(actions_row)
         layout.addWidget(add_panel)
@@ -949,6 +1001,235 @@ class WizardWindow(QMainWindow):
         layout.addWidget(self._preview)
         return w
 
+    def _build_captions_step(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        self._configure_step_layout(layout)
+        title = QLabel("Captions")
+        title.setObjectName("StepTitle")
+        subtitle = QLabel(
+            "Transcribe the clips with Whisper, then fix any wrong words below. "
+            "Edited captions go onto the Resolve timeline as styled titles."
+        )
+        subtitle.setObjectName("StepSubtitle")
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        backend = whisper_backend_label()
+        self._auto_captions_check = QCheckBox("Add captions to the Resolve timeline")
+        self._auto_captions_check.setChecked(
+            backend is not None and settings().value(KEY_AUTO_CAPTIONS, False, type=bool)
+        )
+        self._auto_captions_check.setEnabled(backend is not None)
+        self._auto_captions_check.toggled.connect(self._on_captions_toggled)
+        layout.addWidget(self._auto_captions_check)
+
+        try:
+            self._caption_styles = load_caption_styles()
+        except (ValueError, TypeError) as exc:
+            log_warn("captions", f"caption_styles.json ignored: {exc}")
+            self._caption_styles = {}
+        if not self._caption_styles:
+            self._caption_styles = {DEFAULT_STYLE_NAME: CaptionStyle(DEFAULT_STYLE_NAME)}
+        self._caption_style_combo = QComboBox()
+        self._caption_style_combo.addItems(list(self._caption_styles))
+        saved_style = settings().value(KEY_CAPTION_STYLE, DEFAULT_STYLE_NAME, type=str)
+        if saved_style in self._caption_styles:
+            self._caption_style_combo.setCurrentText(saved_style)
+        self._caption_style_combo.currentTextChanged.connect(self._on_caption_style_changed)
+        self._caption_preview = QLabel()
+        self._caption_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._caption_preview.setMinimumHeight(44)
+        self._caption_preview.setStyleSheet(
+            "background: #2b3a45; border-radius: 6px; padding: 6px; font-weight: 700; font-size: 18px;"
+        )
+        self._caption_preview_index = 0
+        self._caption_preview_timer = QTimer(self)
+        self._caption_preview_timer.setInterval(450)
+        self._caption_preview_timer.timeout.connect(self._tick_caption_preview)
+        style_box = QGroupBox("Style")
+        style_form = QFormLayout(style_box)
+        self._configure_form_layout(style_form)
+        style_form.addRow("Look", self._caption_style_combo)
+        style_form.addRow("Preview", self._caption_preview)
+        layout.addWidget(style_box)
+        self._render_caption_preview()
+
+        self._transcribe_btn = QPushButton("Transcribe clips")
+        self._transcribe_btn.setObjectName("AccentButton")
+        self._transcribe_btn.clicked.connect(lambda: self._start_transcription())
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self._transcribe_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        self._captions_table = QTableWidget(0, 3)
+        self._captions_table.setHorizontalHeaderLabels(["Clip", "Time", "Caption"])
+        self._captions_table.verticalHeader().setVisible(False)
+        header = self._captions_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._captions_table.setMinimumHeight(160)
+        self._captions_table.itemChanged.connect(self._on_caption_edited)
+        layout.addWidget(self._captions_table, stretch=1)
+
+        self._captions_status = QLabel("")
+        self._captions_status.setObjectName("MutedHelpLabel")
+        self._captions_status.setWordWrap(True)
+        layout.addWidget(self._captions_status)
+        return w
+
+    def _selected_caption_style(self) -> CaptionStyle:
+        name = self._caption_style_combo.currentText()
+        return self._caption_styles.get(name) or next(iter(self._caption_styles.values()))
+
+    def _on_caption_style_changed(self, name: str) -> None:
+        settings().setValue(KEY_CAPTION_STYLE, name)
+        self._project.caption_style = name
+        self._caption_preview_index = 0
+        self._render_caption_preview()
+        self._refresh_export_step_note()
+
+    def _tick_caption_preview(self) -> None:
+        self._caption_preview_index += 1
+        self._render_caption_preview()
+
+    def _render_caption_preview(self) -> None:
+        """Approximate the caption look; the highlight cycles like it will in Resolve."""
+        style = self._selected_caption_style()
+        sample = "God is good all the time"
+        if self._project.captions_current():
+            first = next((c for clip in self._project.clip_captions for c in clip), None)
+            if first is not None:
+                sample = first.text
+        words = style.display_text(sample).split()
+        lit = self._caption_preview_index % max(1, len(words)) if style.highlight_color else -1
+        html = " ".join(
+            f'<span style="color:{style.highlight_color if i == lit else style.text_color}">{w}</span>'
+            for i, w in enumerate(words)
+        )
+        self._caption_preview.setText(html)
+        if style.highlight_color and self._stack.currentIndex() == 3:
+            self._caption_preview_timer.start()
+        else:
+            self._caption_preview_timer.stop()
+
+    def _captions_enabled(self) -> bool:
+        return hasattr(self, "_auto_captions_check") and self._auto_captions_check.isChecked()
+
+    def _on_captions_toggled(self, on: bool) -> None:
+        settings().setValue(KEY_AUTO_CAPTIONS, bool(on))
+        self._refresh_captions_step()
+        self._refresh_export_step_note()
+        self._update_nav()
+
+    def _refresh_captions_step(self) -> None:
+        if not hasattr(self, "_captions_table"):
+            return
+        enabled = self._captions_enabled()
+        backend = whisper_backend_label()
+        self._transcribe_btn.setEnabled(enabled and not self._busy)
+        self._captions_table.setEnabled(enabled)
+
+        if not self._project.captions_current():
+            self._fill_captions_table([])
+        else:
+            self._fill_captions_table(self._project.clip_captions)
+
+        if backend is None:
+            text = "Install mlx-whisper or faster-whisper to enable captions."
+        elif not enabled:
+            text = "Captions are off. Next skips this step."
+        elif self._project.captions_current():
+            count = sum(len(c) for c in self._project.clip_captions)
+            text = (
+                f"{count} captions from {len(self._project.clip_captions)} clip(s). "
+                "Double-click a caption to edit it."
+            )
+        elif self._project.clip_captions:
+            text = "Clips changed since the last transcription. Transcribe again (or click Next)."
+        else:
+            text = (
+                f"Not transcribed yet. Uses {backend} ({whisper_model_name()} model); "
+                "the first run downloads the model. Next transcribes automatically."
+            )
+        self._captions_status.setText(text)
+        self._render_caption_preview()
+
+    def _fill_captions_table(self, clip_captions: list[list[Caption]]) -> None:
+        table = self._captions_table
+        table.blockSignals(True)
+        table.setRowCount(0)
+        for clip_idx, captions in enumerate(clip_captions):
+            for cap_idx, cap in enumerate(captions):
+                row = table.rowCount()
+                table.insertRow(row)
+                clip_item = QTableWidgetItem(f"Clip{clip_idx + 1:03d}")
+                time_item = QTableWidgetItem(f"{cap.start:5.1f}s – {cap.end:5.1f}s")
+                text_item = QTableWidgetItem(cap.text)
+                for item in (clip_item, time_item):
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                text_item.setData(Qt.ItemDataRole.UserRole, (clip_idx, cap_idx))
+                table.setItem(row, 0, clip_item)
+                table.setItem(row, 1, time_item)
+                table.setItem(row, 2, text_item)
+        table.blockSignals(False)
+
+    def _on_caption_edited(self, item: QTableWidgetItem) -> None:
+        key = item.data(Qt.ItemDataRole.UserRole)
+        if item.column() != 2 or not key:
+            return
+        clip_idx, cap_idx = key
+        captions = self._project.clip_captions[clip_idx]
+        old = captions[cap_idx]
+        text = item.text().strip()
+        if text == old.text:
+            return
+        captions[cap_idx] = Caption(old.start, old.end, text, old.words)
+        self._refresh_export_step_note()
+
+    def _start_transcription(self, *, advance_to: int | None = None) -> None:
+        clips = [p for p in self._project.clip_paths if p.exists()]
+        if not clips:
+            QMessageBox.warning(self, "Wordly", "Trim the clips in the Preview step first.")
+            return
+        self._status.setText("Transcribing clips…")
+        self._progress.setVisible(True)
+        self._progress.setFormat("Transcribing — starting…")
+        source = list(self._project.clip_paths)
+        max_words = self._selected_caption_style().max_words
+
+        def job(*, progress_cb, should_cancel):
+            durations = [ffprobe_duration_seconds(p) for p in clips]
+            return transcribe_clips(
+                clips,
+                durations,
+                progress_cb=progress_cb,
+                should_cancel=should_cancel,
+                max_words=max_words,
+            )
+
+        def on_ok(result: list[list[Caption]]) -> None:
+            self._project.clip_captions = [list(c) for c in result]
+            self._project.captions_source = source
+            count = sum(len(c) for c in result)
+            log_step("captions", f"Transcribed {len(result)} clip(s) → {count} captions")
+            self._status.setText(f"{count} captions ready")
+            self._refresh_captions_step()
+            self._refresh_export_step_note()
+            self._update_nav()
+            if advance_to is not None:
+                self._stack.setCurrentIndex(advance_to)
+
+        def on_fail(message: str) -> None:
+            self._refresh_captions_step()
+            if message and message != "Cancelled":
+                QMessageBox.warning(self, "Wordly", f"Transcription failed:\n{message}")
+
+        self._run_job(job, on_ok=on_ok, on_fail=on_fail)
+
     def _build_verse_step(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
@@ -957,7 +1238,7 @@ class WizardWindow(QMainWindow):
         title.setObjectName("StepTitle")
         subtitle = QLabel(
             "Type or paste the reference on the first line and the verse text below. "
-            "It appears on the text layer in your Filmora export."
+            "It is written into verse.srt / verse.txt for your Resolve export."
         )
         subtitle.setObjectName("StepSubtitle")
         subtitle.setWordWrap(True)
@@ -1015,6 +1296,76 @@ class WizardWindow(QMainWindow):
         layout.addStretch(1)
         return w
 
+    def _build_verse_music_step(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        self._configure_step_layout(layout)
+
+        title = QLabel("Bible verse and instrumental")
+        title.setObjectName("StepTitle")
+        subtitle = QLabel(
+            "Add the verse and choose the instrumental bed for the Resolve export."
+        )
+        subtitle.setObjectName("StepSubtitle")
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        verse_box = QGroupBox("Bible verse")
+        verse_layout = QVBoxLayout(verse_box)
+        verse_layout.setContentsMargins(8, 10, 8, 8)
+        verse_layout.setSpacing(6)
+        verse_hint = QLabel(
+            "Type or paste the reference on the first line and the verse text below."
+        )
+        verse_hint.setObjectName("MutedHelpLabel")
+        verse_hint.setWordWrap(True)
+        self._verse_edit = QPlainTextEdit()
+        self._verse_edit.setPlaceholderText(
+            "e.g.\nJohn 3:16\nFor God so loved the world…"
+        )
+        self._verse_edit.setMinimumHeight(105)
+        self._verse_edit.textChanged.connect(self._sync_manual_verse)
+        verse_layout.addWidget(verse_hint)
+        verse_layout.addWidget(self._verse_edit)
+        layout.addWidget(verse_box)
+
+        music_box = QGroupBox("Instrumental bed")
+        music_layout = QVBoxLayout(music_box)
+        music_layout.setContentsMargins(8, 10, 8, 8)
+        music_layout.setSpacing(6)
+        music_hint = QLabel(
+            "Paste a YouTube (or other) audio URL to download, or choose an audio file "
+            "already on your computer."
+        )
+        music_hint.setObjectName("MutedHelpLabel")
+        music_hint.setWordWrap(True)
+        self._music_url_edit = QLineEdit()
+        self._music_url_edit.setPlaceholderText("https://www.youtube.com/watch?v=…")
+        self._download_music_url_btn = QPushButton("Download from URL")
+        self._download_music_url_btn.setObjectName("AccentButton")
+        self._download_music_url_btn.clicked.connect(self._download_music_from_url)
+        self._local_music_btn = QPushButton("Choose local audio…")
+        self._local_music_btn.clicked.connect(self._browse_local_music)
+
+        form = QFormLayout()
+        self._configure_form_layout(form)
+        form.addRow("Audio URL", self._music_url_edit)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self._download_music_url_btn)
+        btn_row.addWidget(self._local_music_btn)
+        btn_row.addStretch(1)
+        self._music_status = QLabel("No instrumental loaded yet.")
+        self._music_status.setObjectName("MutedHelpLabel")
+        self._music_status.setWordWrap(True)
+        music_layout.addWidget(music_hint)
+        music_layout.addLayout(form)
+        music_layout.addLayout(btn_row)
+        music_layout.addWidget(self._music_status)
+        layout.addWidget(music_box)
+        layout.addStretch(1)
+        return w
+
     def _build_name_step(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
@@ -1023,7 +1374,7 @@ class WizardWindow(QMainWindow):
         title.setObjectName("StepTitle")
         subtitle = QLabel(
             f"Defaults to last Sunday's date ({default_export_project_name()}). "
-            "Used for exports/{name}/{name}.wfp."
+            "Used for exports/{name}/{name}.fcpxml."
         )
         subtitle.setObjectName("StepSubtitle")
         subtitle.setWordWrap(True)
@@ -1051,11 +1402,72 @@ class WizardWindow(QMainWindow):
         self._refresh_export_step_note()
         template_note.setObjectName("MutedHelpLabel")
         template_note.setWordWrap(True)
-        host_note = QLabel(filmora_host_note())
+        host_note = QLabel(
+            "Primary target: macOS. Keep the .fcpxml beside the media/ folder."
+        )
         host_note.setObjectName("MutedHelpLabel")
         host_note.setWordWrap(True)
         layout.addWidget(template_note)
         layout.addWidget(host_note)
+        self._export_result = QLabel("")
+        self._export_result.setObjectName("MutedHelpLabel")
+        self._export_result.setWordWrap(True)
+        layout.addWidget(self._export_result)
+        layout.addStretch(1)
+        return w
+
+    def _build_project_export_step(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        self._configure_step_layout(layout)
+
+        title = QLabel("Layers and project name")
+        title.setObjectName("StepTitle")
+        subtitle = QLabel(
+            "Confirm the Resolve project name and export details before generating."
+        )
+        subtitle.setObjectName("StepSubtitle")
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        self._project_name_edit = QLineEdit(default_export_project_name())
+        self._last_suggested_project_name = self._project_name_edit.text()
+        self._project_name_edit.textChanged.connect(self._on_project_name_changed)
+        name_box = QGroupBox("Project name")
+        name_form = QFormLayout(name_box)
+        self._configure_form_layout(name_form)
+        name_form.addRow("Name", self._project_name_edit)
+        layout.addWidget(name_box)
+
+        layers_box = QGroupBox("Resolve timeline")
+        layers_layout = QVBoxLayout(layers_box)
+        layers_layout.setContentsMargins(8, 10, 8, 8)
+        layers_layout.setSpacing(6)
+        template_note = QLabel("")
+        self._export_template_note = template_note
+        self._refresh_export_step_note()
+        template_note.setObjectName("MutedHelpLabel")
+        template_note.setWordWrap(True)
+        host_note = QLabel(
+            "Resolve Free exports without watermarks when you avoid Studio-only effects. "
+            "Keep the .fcpxml beside the media/ folder."
+        )
+        host_note.setObjectName("MutedHelpLabel")
+        host_note.setWordWrap(True)
+        layers_layout.addWidget(template_note)
+        layers_layout.addWidget(host_note)
+
+        self._reel_layout_check = QCheckBox("Reel layout — blurred background, video centred, verse above")
+        self._reel_layout_check.setChecked(settings().value(KEY_REEL_LAYOUT, True, type=bool))
+        self._reel_layout_check.toggled.connect(lambda on: settings().setValue(KEY_REEL_LAYOUT, bool(on)))
+        layers_layout.addWidget(self._reel_layout_check)
+        self._export_captions_note = QLabel("")
+        self._export_captions_note.setObjectName("MutedHelpLabel")
+        self._export_captions_note.setWordWrap(True)
+        layers_layout.addWidget(self._export_captions_note)
+        layout.addWidget(layers_box)
+
         self._export_result = QLabel("")
         self._export_result.setObjectName("MutedHelpLabel")
         self._export_result.setWordWrap(True)
@@ -1074,11 +1486,19 @@ class WizardWindow(QMainWindow):
         if idx == 2:
             return self._step_complete(0) and self._step_complete(1)
         if idx == 3:
-            verse = self._project.selected_verse
-            return bool(verse and verse.reference.strip() and verse.text.strip())
+            # Next transcribes first when captions are on but not generated yet.
+            return True
         if idx == 4:
+            verse = self._project.selected_verse
             music = self._project.selected_music
-            return bool(music and music.local_path and music.local_path.is_file())
+            return bool(
+                verse
+                and verse.reference.strip()
+                and verse.text.strip()
+                and music
+                and music.local_path
+                and music.local_path.is_file()
+            )
         if idx == 5:
             return bool(self._project_name_edit.text().strip())
         return True
@@ -1091,12 +1511,22 @@ class WizardWindow(QMainWindow):
         self._next_btn.setEnabled(can_advance)
         if self._busy and idx == 2:
             self._next_btn.setText("Trimming…")
+        elif self._busy and idx == 3:
+            self._next_btn.setText("Transcribing…")
         elif idx == len(titles) - 1:
-            self._next_btn.setText("Generate .wfp project file")
+            self._next_btn.setText("Generate Resolve project")
         else:
             self._next_btn.setText("Next →")
         self._progress.setVisible(self._busy)
         self._status.setVisible(self._busy)
+        if hasattr(self, "_download_btn"):
+            self._download_btn.setEnabled(not self._busy)
+        if hasattr(self, "_open_local_btn"):
+            self._open_local_btn.setEnabled(not self._busy)
+        if hasattr(self, "_find_highlights_btn"):
+            self._find_highlights_btn.setEnabled(not self._busy)
+        if hasattr(self, "_transcribe_btn"):
+            self._transcribe_btn.setEnabled(self._captions_enabled() and not self._busy)
         self._refresh_step_indicator()
         self._refresh_add_segment_enabled()
 
@@ -1108,9 +1538,12 @@ class WizardWindow(QMainWindow):
             self._refresh_timestamp_hints()
         elif index == 2:
             self._load_preview_for_current_sermon()
+        elif index == 3:
+            self._refresh_captions_step()
+        if hasattr(self, "_caption_preview_timer"):
+            self._render_caption_preview()
         elif index == 5:
             self._refresh_default_project_name()
-        elif index == 6:
             self._refresh_export_step_note()
         self._stack.update()
         self._request_full_repaint()
@@ -1129,19 +1562,31 @@ class WizardWindow(QMainWindow):
         self._refresh_export_step_note()
 
     def _refresh_export_step_note(self) -> None:
+        if hasattr(self, "_export_captions_note"):
+            if not self._captions_enabled():
+                text = "Captions: off (turn them on in the Captions step)."
+            elif self._project.captions_current():
+                count = sum(len(c) for c in self._project.clip_captions)
+                text = (
+                    f"Captions: {count} reviewed captions in “{self._selected_caption_style().name}” style "
+                    "will be added above the video, plus captions.srt."
+                )
+            else:
+                text = "Captions: on — clips will be transcribed during export."
+            self._export_captions_note.setText(text)
         if not hasattr(self, "_export_template_note"):
             return
         name = self._project_name_edit.text().strip() or default_export_project_name()
         if template_available():
             self._export_template_note.setText(
-                "Wordly clones assets/filmora_templates/sermon-highlights.wfp and patches it "
-                "with your sermon source, trimmed segments, instrumental, and cover. "
-                f"Writes exports/{name}/{name}.wfp and a media/ folder beside it."
+                "Wordly writes a Resolve Free import bundle: FCPXML timeline, media/ "
+                "(Clip001…, instrumental), verse.srt, and OPEN_IN_RESOLVE.txt. "
+                f"Output: exports/{name}/{name}.fcpxml"
             )
         else:
             self._export_template_note.setText(
-                "Add sermon-highlights.wfp plus video.mp4, music.mp3, and image.jpg under "
-                "assets/filmora_templates/ (save a blank project from Filmora 15 on this Mac)."
+                "Add assets/resolve_templates/sermon-highlights.fcpxml "
+                "(or set WORDLY_RESOLVE_TEMPLATE). See docs/TEMPLATE_AUTHORING.md."
             )
 
     def _go_back(self) -> None:
@@ -1162,8 +1607,11 @@ class WizardWindow(QMainWindow):
         if idx == 2:
             self._advance_from_preview()
             return
+        if idx == 3 and self._captions_enabled() and not self._project.captions_current():
+            self._start_transcription(advance_to=4)
+            return
         if idx >= len(self._steps) - 1:
-            self._generate_wfp()
+            self._generate_resolve()
             return
         self._stack.setCurrentIndex(idx + 1)
 
@@ -1301,7 +1749,7 @@ class WizardWindow(QMainWindow):
     def _start_download(self) -> None:
         url = self._url_edit.text().strip()
         if not url:
-            QMessageBox.warning(self, "Wordly", "Paste a Facebook URL first.")
+            QMessageBox.warning(self, "Wordly", "Paste a Facebook or YouTube URL first.")
             return
         self._save_prefs()
         self._project.fb_url = url
@@ -1314,6 +1762,84 @@ class WizardWindow(QMainWindow):
             )
 
         self._run_job(job, on_ok=lambda path: self._set_sermon(path))
+
+    def _ensure_api_key(self) -> bool:
+        """Ask once for the Anthropic API key and save it to the project's .env file."""
+        try:
+            api_key()
+            return True
+        except MissingApiKey:
+            pass
+        key, ok = QInputDialog.getText(
+            self,
+            "Anthropic API key",
+            "Paste your Anthropic API key (from console.anthropic.com).\n"
+            "Wordly saves it in this project's .env file (git-ignored, only readable by you).",
+            QLineEdit.EchoMode.Password,
+        )
+        if not ok or not key.strip():
+            return False
+        try:
+            save_api_key(key)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Wordly", str(exc))
+            return False
+        return True
+
+    def _find_highlights(self) -> None:
+        sermon = self._project.sermon_path
+        if not sermon or not sermon.is_file():
+            QMessageBox.warning(self, "Wordly", "Load the service video first (step 1).")
+            return
+        if self._project.segments:
+            answer = QMessageBox.question(
+                self,
+                "Wordly",
+                "Replace your current segments with Claude's highlights?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        if not self._ensure_api_key():
+            return
+        self._highlights_summary.setText("Working… transcribing a whole service takes a few minutes the first time.")
+
+        def job(*, progress_cb, should_cancel):
+            return find_highlights(sermon, progress_cb=progress_cb, should_cancel=should_cancel)
+
+        def on_fail(message: str) -> None:
+            self._highlights_summary.setText("")
+            if message and message != "Cancelled":
+                QMessageBox.warning(self, "Wordly", f"Couldn't find highlights:\n{message}")
+
+        self._run_job(job, on_ok=self._apply_highlights, on_fail=on_fail)
+
+    def _apply_highlights(self, plan: HighlightPlan) -> None:
+        self._project.segments = [
+            ClipSegment(highlight_timecode(h.start), highlight_timecode(h.end), h.title) for h in plan.highlights
+        ]
+        self._project.clip_paths = []
+        self._project.joined_clip_path = None
+        self._segment_list.clear()
+        self._preview_segment.clear()
+        for seg in self._project.segments:
+            self._segment_list.addItem(seg.display_name)
+            self._preview_segment.addItem(seg.display_name)
+        if plan.verse_reference and not self._verse_edit.toPlainText().strip():
+            # Pre-fill the verse step; the wording is from Claude, so it should be checked.
+            self._verse_edit.setPlainText(f"{plan.verse_reference}\n{plan.verse_text}")
+        lines = [
+            f"Sermon found at {format_clock(plan.sermon_start)}–{format_clock(plan.sermon_end)}"
+            + (f" — “{plan.sermon_title}”" if plan.sermon_title else ""),
+        ]
+        for i, h in enumerate(plan.highlights, start=1):
+            lines.append(f"{i}. {h.title} ({format_clock(h.start)}, {h.duration:.0f}s): {h.reason}")
+        lines.append(f"Total {plan.total_s:.0f}s.")
+        if plan.verse_reference:
+            lines.append(f"Suggested verse: {plan.verse_reference} — {plan.verse_reason} (check the wording)")
+        lines.extend(plan.notes)
+        self._highlights_summary.setText("\n".join(lines))
+        self._on_timestamp_fields_changed()
+        self._update_nav()
 
     def _set_segment_end_offset(self, offset_s: float) -> None:
         start_t = normalize_four_digit_timecode(self._seg_start.text().strip())
@@ -1440,12 +1966,108 @@ class WizardWindow(QMainWindow):
         def on_ok(paths: list[Path]) -> None:
             self._project.clip_paths = paths
             self._project.joined_clip_path = paths[0] if paths else None
+            self._project.clip_captions = []
+            self._project.captions_source = []
             self._status.setText(f"{len(paths)} clip{'s' if len(paths) != 1 else ''} ready")
             self._update_nav()
             if advance_to is not None:
                 self._stack.setCurrentIndex(advance_to)
 
         self._run_job(job, on_ok=on_ok, on_fail=lambda _err: None)
+
+    def _export_trimmed_clips_clicked(self) -> None:
+        if not self._project.sermon_path:
+            QMessageBox.warning(self, "Wordly", "Load a sermon first.")
+            return
+        if not self._project.segments:
+            QMessageBox.warning(self, "Wordly", "Add timestamp segments first.")
+            return
+
+        dest = QFileDialog.getExistingDirectory(
+            self,
+            "Choose folder for trimmed clips",
+            str(DOWNLOADS),
+        )
+        if not dest:
+            return
+        output_dir = Path(dest).resolve()
+
+        self._status.setText("Exporting trimmed clips…")
+        self._progress.setVisible(True)
+        self._progress.setFormat("Exporting — starting…")
+        sermon = self._project.sermon_path
+        segments = list(self._project.segments)
+
+        def job(*, progress_cb, should_cancel):
+            return export_clips(
+                sermon,
+                segments,
+                output_dir,
+                progress_cb=progress_cb,
+                should_cancel=should_cancel,
+            )
+
+        def on_ok(paths: list[Path]) -> None:
+            self._status.setText(f"Exported {len(paths)} clip(s) to {output_dir}")
+            QMessageBox.information(
+                self,
+                "Wordly",
+                f"Saved {len(paths)} clip(s) to:\n{output_dir}",
+            )
+
+        self._run_job(job, on_ok=on_ok)
+
+    def _export_merged_video_clicked(self) -> None:
+        if not self._project.sermon_path:
+            QMessageBox.warning(self, "Wordly", "Load a sermon first.")
+            return
+        if not self._project.segments:
+            QMessageBox.warning(self, "Wordly", "Add timestamp segments first.")
+            return
+
+        suggested = (self._project.project_name or "highlights")[:60].strip() or "highlights"
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in suggested)
+        default_path = (DOWNLOADS / f"{safe}.mp4").resolve()
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save merged video",
+            str(default_path),
+            "Video (*.mp4);;All files (*)",
+        )
+        if not path:
+            return
+        out_path = Path(path).resolve()
+        if out_path.suffix.lower() != ".mp4":
+            out_path = out_path.with_suffix(".mp4")
+
+        self._status.setText("Exporting merged video…")
+        self._progress.setVisible(True)
+        self._progress.setFormat("Exporting — starting…")
+
+        sermon = self._project.sermon_path
+        segments = list(self._project.segments)
+        tmp_dir = CLIPS / f"{safe}_export"
+
+        def job(*, progress_cb, should_cancel):
+            clips = export_clips(
+                sermon,
+                segments,
+                tmp_dir,
+                progress_cb=progress_cb,
+                should_cancel=should_cancel,
+            )
+            return merge_clips(
+                clips,
+                out_path,
+                progress_cb=progress_cb,
+                should_cancel=should_cancel,
+            )
+
+        def on_ok(merged: Path) -> None:
+            self._status.setText(f"Merged video ready — {merged}")
+            QMessageBox.information(self, "Wordly", f"Saved merged video:\n{merged}")
+
+        self._run_job(job, on_ok=on_ok)
 
     @classmethod
     def _parse_verse_input(cls, raw: str) -> tuple[str, str] | None:
@@ -1526,11 +2148,14 @@ class WizardWindow(QMainWindow):
         if app is not None:
             app.processEvents()
 
-    def _generate_wfp(self) -> None:
+    def _generate_resolve(self) -> None:
         if self._busy:
             return
         self._project.project_name = self._project_name_edit.text().strip() or default_export_project_name()
-        log_step("export", f"Generate .wfp requested for {self._project.project_name!r}")
+        self._project.auto_captions = self._captions_enabled()
+        self._project.caption_style = self._selected_caption_style().name
+        self._project.reel_layout = self._reel_layout_check.isChecked()
+        log_step("export", f"Generate Resolve project requested for {self._project.project_name!r}")
         if self._project.segments:
             seg_summary = ", ".join(
                 f"{s.start_text}–{s.end_text}" for s in self._project.segments[:4]
@@ -1549,7 +2174,7 @@ class WizardWindow(QMainWindow):
         self._progress.setValue(0)
         self._progress.setFormat("Preparing export…")
         self._status.setVisible(True)
-        self._export_progress(-1.0, "Preparing Filmora export…")
+        self._export_progress(-1.0, "Preparing Resolve export…")
 
         sermon = self._project.sermon_path
         if sermon and sermon.is_file():
@@ -1560,49 +2185,70 @@ class WizardWindow(QMainWindow):
                 except Exception as exc:  # noqa: BLE001
                     self._busy = False
                     self._update_nav()
-                    self._on_wfp_export_failed(f"Could not read sermon duration: {exc}")
+                    self._on_resolve_export_failed(f"Could not read sermon duration: {exc}")
                     return
                 if self._project.sermon_duration_s <= 0:
                     self._busy = False
                     self._update_nav()
-                    self._on_wfp_export_failed(
+                    self._on_resolve_export_failed(
                         "Sermon duration is not ready yet. Wait for the download step to "
                         "finish loading, then try again."
                     )
                     return
 
         try:
-            path = generate_wfp(self._project, progress_cb=self._export_progress)
+            path = generate_resolve_project(self._project, progress_cb=self._export_progress)
         except Exception as exc:  # noqa: BLE001
-            self._on_wfp_export_failed(str(exc))
+            self._on_resolve_export_failed(str(exc))
         else:
-            self._on_wfp_exported(path)
+            self._on_resolve_exported(path)
         finally:
             self._busy = False
             self._progress.setValue(1000)
             self._progress.setFormat("Done")
             self._update_nav()
 
-    def _on_wfp_exported(self, path: Path) -> None:
+    def _on_resolve_exported(self, path: Path) -> None:
         log_step("export", f"Export finished: {path}")
         bundle_dir = path.parent
-        self._export_result.setText(f"Saved Filmora project:\n{path}\n\nMedia folder:\n{bundle_dir / 'media'}")
-        self._status.setText(f".wfp ready — {path}")
-        try:
-            log_step("export", f"Launching Filmora with {path.name}")
-            open_filmora_project(path)
-            self._status.setText(f"Opened in Filmora — {path}")
-        except Exception as exc:  # noqa: BLE001
-            log_error("export", f"Filmora launch failed: {exc}")
+        self._export_result.setText(
+            f"Saved Resolve import bundle:\n{path}\n\nMedia folder:\n{bundle_dir / 'media'}"
+        )
+        self._status.setText(f"Resolve project ready — {path}")
+        # Start after _generate_resolve clears the busy flag (_run_job ignores busy calls).
+        QTimer.singleShot(0, lambda: self._open_in_resolve(path))
+
+    def _open_in_resolve(self, path: Path) -> None:
+        project_name = self._project.project_name or path.stem
+        log_step("export", f"Opening {path.name} in DaVinci Resolve")
+
+        def job(*, progress_cb, should_cancel):
+            return open_resolve_project(
+                path,
+                project_name=project_name,
+                progress_cb=progress_cb,
+                should_cancel=should_cancel,
+            )
+
+        def on_ok(name: str) -> None:
+            log_step("export", f"Resolve project opened: {name}")
+            self._status.setText(f"Opened in DaVinci Resolve — project “{name}”")
+            self._export_result.setText(
+                f"Opened in DaVinci Resolve as project “{name}”.\n\nExport folder:\n{path.parent}"
+            )
+
+        def on_fail(message: str) -> None:
+            log_error("export", f"Resolve open failed: {message}")
+            reveal_in_finder(path)
             QMessageBox.warning(
                 self,
                 "Wordly",
-                f"Project saved to:\n{path}\n\nCould not launch Filmora automatically:\n{exc}\n\n"
-                "Double-click the .wfp in Finder, or open it from Filmora "
-                "(File → Open Project).",
+                f"Project saved to:\n{path}\n\nCould not open it in Resolve automatically:\n{message}",
             )
 
-    def _on_wfp_export_failed(self, message: str) -> None:
+        self._run_job(job, on_ok=on_ok, on_fail=on_fail)
+
+    def _on_resolve_export_failed(self, message: str) -> None:
         log_error("export", message)
         QMessageBox.critical(self, "Wordly", message)
 
@@ -1628,8 +2274,6 @@ class WizardWindow(QMainWindow):
         worker.finished_ok.connect(self._on_job_finished_ok, Qt.ConnectionType.QueuedConnection)
         worker.failed.connect(thread.quit, Qt.ConnectionType.QueuedConnection)
         worker.finished_ok.connect(thread.quit, Qt.ConnectionType.QueuedConnection)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._clear_job_thread)
         self._thread = thread
         self._worker = worker
@@ -1638,14 +2282,16 @@ class WizardWindow(QMainWindow):
         thread.start()
 
     def _wait_for_job_thread(self) -> None:
-        thread = self._thread
+        thread, worker = self._thread, self._worker
+        self._thread = None
+        self._worker = None
         if thread is None:
             return
         if thread.isRunning():
             thread.quit()
             thread.wait(30_000)
-        self._thread = None
-        self._worker = None
+        # Its finished() may still be queued; keep it alive until that is handled.
+        self._retired_jobs.append((thread, worker))
 
     @Slot(str)
     def _on_job_failed(self, msg: str) -> None:
@@ -1657,9 +2303,16 @@ class WizardWindow(QMainWindow):
 
     @Slot()
     def _clear_job_thread(self) -> None:
-        if self.sender() is self._thread:
+        sender = self.sender()
+        if isinstance(sender, QThread):
+            # finished() is emitted from inside the thread just before it stops.
+            sender.wait(5_000)
+        if sender is self._thread:
+            self._retired_jobs.append((self._thread, self._worker))
             self._thread = None
             self._worker = None
+        # Release only threads that have completely stopped.
+        self._retired_jobs = [(t, w) for t, w in self._retired_jobs if not t.isFinished()]
 
     def _on_job_progress(self, ratio: float, message: str) -> None:
         log_progress("wizard", message, ratio=ratio if ratio >= 0 else None)
@@ -1704,7 +2357,11 @@ class WizardWindow(QMainWindow):
             if app is not None:
                 app.removeEventFilter(self)
         self._save_prefs()
-        self._wait_for_job_thread()
+        # Cancel first: waiting on a running job before cancelling it froze the
+        # window for up to 30 s on close.
         if self._worker is not None:
             self._worker.cancel()
+        self._wait_for_job_thread()
+        for thread, _ in self._retired_jobs:
+            thread.wait(5_000)
         super().closeEvent(event)

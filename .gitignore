@@ -52,13 +52,12 @@ Desktop.ini
 /assets/music/*
 !/assets/music/.gitkeep
 
-# Filmora template backups & one-off debug tool artifacts
-*.wfp.bak
+# One-off debug tool artifacts
 /tools/_*
 /tools/*.txt
 /tools/*.json
 
-# Per-PC Filmora template bundle media (point your .wfp at local files)
-/assets/filmora_templates/video.mp4
-/assets/filmora_templates/music.mp3
-/assets/filmora_templates/image.jpg
+# Optional large Resolve template stub media (keep interchange XML in git)
+/assets/resolve_templates/Clip*.mp4
+/assets/resolve_templates/instrumental.*
+/assets/resolve_templates/cover.jpg
