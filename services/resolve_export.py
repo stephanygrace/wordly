@@ -273,6 +273,32 @@ def _add_caption_titles(
 
 # Background song level under the sermon audio.
 MUSIC_GAIN_DB = -10.0
+# The song fades to silence over the reel's last seconds.
+MUSIC_FADE_OUT_S = 3.0
+
+
+def _fade_out_music(src: Path, *, end_s: float, fade_s: float = MUSIC_FADE_OUT_S) -> Path:
+    """A copy of *src* that stops at *end_s*, fading to silence over its last *fade_s* seconds.
+
+    Baked into the file because Resolve doesn't reliably import volume keyframes
+    from FCPXML; the clip volume stays editable. Falls back to *src* if ffmpeg fails.
+    """
+    end_s = min(end_s, _safe_duration(src, fallback_s=end_s))
+    fade_s = min(fade_s, end_s)
+    dest = src.with_name(f"{src.stem}_fade.m4a")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-t", f"{end_s:.3f}",
+                "-af", f"afade=t=out:st={end_s - fade_s:.3f}:d={fade_s:.3f}",
+                "-vn", "-c:a", "aac", "-b:a", "192k", str(dest),
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return src
+    return dest if dest.is_file() and dest.stat().st_size > 0 else src
 
 # Captions use lanes 1-2; the verse sits above them.
 VERSE_LANE = 3
@@ -812,6 +838,10 @@ def generate_resolve_project(
         project.selected_verse.text,
         sermon_duration_s,
     )
+
+    if music_path is not None:
+        _progress(progress_cb, 0.91, "Fading out the music…")
+        music_path = _fade_out_music(music_path, end_s=timeline_duration_s)
 
     _progress(progress_cb, 0.92, "Writing FCPXML timeline…")
     root = _build_fcpxml(

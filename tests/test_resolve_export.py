@@ -202,6 +202,41 @@ class TestGenerateResolveProject(unittest.TestCase):
             self.assertEqual(project.resolve_output_path, timeline)
 
 
+    def test_music_fades_out_over_the_last_three_seconds(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clip = root / "src_clip.mp4"
+            clip.write_bytes(b"\x00" * 256)
+            music = root / "bed.mp3"
+            music.write_bytes(b"\x00" * 128)
+            project = ProjectState(
+                reel_layout=False,
+                project_name="fade",
+                clip_paths=[clip],
+                segments=[ClipSegment("00:00:01", "00:00:21", "Hope")],
+                selected_verse=VerseChoice("John 3:16", "For God so loved the world."),
+                selected_music=MusicChoice("Calm Piano", local_path=music),
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(cmd, **_kw):
+                calls.append(cmd)
+                Path(cmd[-1]).write_bytes(b"aac")  # ffmpeg wrote its output
+
+            durations = {"Clip001": 21.0, "instrumental": 180.0}
+            with patch(
+                "services.resolve_export._safe_duration",
+                side_effect=lambda p, **_k: durations.get(Path(p).stem, 21.0),
+            ), patch("services.resolve_export.subprocess.run", side_effect=fake_run):
+                timeline = generate_resolve_project(project, output_dir=root / "out")
+
+            fade = next(c for c in calls if any("afade" in a for a in c))
+            # The reel is 20 s (21 s minus the hidden half second at each end).
+            self.assertEqual(fade[fade.index("-t") + 1], "20.000")
+            self.assertEqual(fade[fade.index("-af") + 1], "afade=t=out:st=17.000:d=3.000")
+            assets = ET.parse(timeline).getroot().findall("./resources/asset")
+            self.assertTrue(any(a.get("src", "").endswith("media/instrumental_fade.m4a") for a in assets))
+
     def test_generate_uses_reviewed_captions_without_transcribing(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
