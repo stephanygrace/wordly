@@ -292,7 +292,7 @@ class TestGenerateResolveProject(unittest.TestCase):
             self.assertEqual(verse.find("adjust-transform").get("position"), "0 -10.75")
             style = verse.find("text-style-def/text-style")
             self.assertEqual(
-                (style.get("font"), style.get("fontFace"), style.get("fontSize")), ("Outfit", "SemiBold", "20")
+                (style.get("font"), style.get("fontFace"), style.get("fontSize")), ("Outfit", "SemiBold", "18")
             )
             self.assertIsNone(root_el.find("./resources/format[@name='FFVideoFormatRateUndefined']"))
             self.assertEqual(connected["Instrumental"].get("lane"), "-2")

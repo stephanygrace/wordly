@@ -41,7 +41,7 @@ class ReelLayout:
     verse_gap_px: int = 50  # between the verse block and the top of the video
     verse_color: str = "#FFFFFF"
     # Verse text: Outfit SemiBold at this Resolve title size (the Inspector "Size" value).
-    verse_resolve_size: int = 20
+    verse_resolve_size: int = 18
     # Main video: how far a far-away speaker may be enlarged (sharpness limit).
     main_max_zoom: float = 3.0
 
