@@ -6,7 +6,8 @@ import re
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtGui import QCursor, QKeySequence, QMoveEvent, QPixmap, QResizeEvent, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -41,7 +42,7 @@ from PySide6.QtWidgets import (
 from models.project import ClipSegment, MusicChoice, ProjectState, VerseChoice
 from services.downloader import download_backend_description, download_facebook_video
 from services.multi_clip import export_clips, merge_clips
-from services.music_downloader import AUDIO_EXTENSIONS, download_instrumental
+from services.music_downloader import AUDIO_EXTENSIONS, download_instrumental, library_tracks, track_title
 from services.photo_downloader import IMAGE_EXTENSIONS, download_photo
 from services.trimmer import ffprobe_duration_seconds
 from services.resolve_export import END_PHOTO_S, generate_resolve_project
@@ -955,6 +956,24 @@ class WizardWindow(QMainWindow):
         self._show_end_photo(self._project.end_photo)
 
         music_card = Card("Instrumental", "Plays quietly under the whole reel.")
+        # Library: everything in assets/music (downloads land there too).
+        self._music_list = QListWidget()
+        self._music_list.setMaximumHeight(230)
+        self._music_list.currentItemChanged.connect(self._on_music_item_changed)
+        self._music_empty = label(
+            "No music yet. Download one below, or put audio files in assets/music.", "Faint", wrap=True
+        )
+        self._music_player = QMediaPlayer(self)
+        self._music_player.setAudioOutput(QAudioOutput(self._music_player))
+        self._music_player.playbackStateChanged.connect(self._on_music_playback_changed)
+        self._listen_btn = button("▶  Listen", "Small", tooltip="Hear the selected song", on_click=self._toggle_music_listen)
+        listen_row = QHBoxLayout()
+        listen_row.addWidget(self._listen_btn)
+        listen_row.addStretch(1)
+        music_card.body.addWidget(label("Your music", "FieldLabel"))
+        music_card.body.addWidget(self._music_list)
+        music_card.body.addWidget(self._music_empty)
+        music_card.body.addLayout(listen_row)
         self._music_url_edit = QLineEdit()
         self._music_url_edit.setPlaceholderText("YouTube link, or a song name to search")
         self._music_url_edit.setClearButtonEnabled(True)
@@ -976,6 +995,7 @@ class WizardWindow(QMainWindow):
         music_card.body.addWidget(self._music_status)
         right.addWidget(music_card)
         right.addStretch(1)
+        self._refresh_music_library()
         return page
 
     # --- Step 5: Export ----------------------------------------------------
@@ -1219,6 +1239,10 @@ class WizardWindow(QMainWindow):
     def _on_step_changed(self, index: int) -> None:
         if self._last_step_index == S_HIGHLIGHTS and index != S_HIGHLIGHTS:
             self._preview.stop()
+        if self._last_step_index == S_VERSE_MUSIC and index != S_VERSE_MUSIC:
+            self._music_player.stop()
+        if index == S_VERSE_MUSIC:
+            self._refresh_music_library()  # pick up files added to assets/music meanwhile
         self._last_step_index = index
         _, title, subtitle = _STEPS[index]
         self._page_eyebrow.setText(f"STEP {index + 1} OF {len(_STEPS)}")
@@ -1856,7 +1880,8 @@ class WizardWindow(QMainWindow):
             return download_instrumental(query, progress_cb=progress_cb, should_cancel=should_cancel)
 
         def on_ok(path: Path) -> None:
-            self._set_music(MusicChoice(title=path.stem or title, local_path=path))
+            self._refresh_music_library()
+            self._set_music(MusicChoice(title=track_title(path) or title, local_path=path))
 
         self._run_job(job, on_ok=on_ok, message="Downloading the instrumental…")
 
@@ -1926,7 +1951,64 @@ class WizardWindow(QMainWindow):
         self._project.selected_music = music
         self._music_status.setText(f"♪  {music.title}")
         set_prop(self._music_status, "tone", "ok")
+        self._select_music_row(music.local_path)
         self._update_nav()
+
+    def _refresh_music_library(self) -> None:
+        """List assets/music; the chosen song stays selected."""
+        lst = self._music_list
+        lst.blockSignals(True)
+        lst.clear()
+        for path in library_tracks():
+            item = QListWidgetItem(f"♪  {track_title(path)}")
+            item.setData(Qt.ItemDataRole.UserRole, str(path.resolve()))
+            item.setToolTip(path.name)
+            lst.addItem(item)
+        lst.blockSignals(False)
+        has = lst.count() > 0
+        lst.setVisible(has)
+        self._music_empty.setVisible(not has)
+        self._listen_btn.setVisible(has)
+        music = self._project.selected_music
+        self._select_music_row(music.local_path if music else None)
+
+    def _select_music_row(self, path: Path | None) -> None:
+        lst = self._music_list
+        target = str(Path(path).resolve()) if path else None
+        row = next((i for i in range(lst.count()) if lst.item(i).data(Qt.ItemDataRole.UserRole) == target), -1)
+        lst.blockSignals(True)
+        lst.setCurrentRow(row)
+        lst.blockSignals(False)
+
+    def _on_music_item_changed(self, item: QListWidgetItem | None, _previous=None) -> None:
+        if item is None:
+            return
+        path = Path(item.data(Qt.ItemDataRole.UserRole))
+        if not path.is_file():
+            self._refresh_music_library()  # removed from the folder since it was listed
+            return
+        if self._music_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._play_music(path)  # keep listening, now to the new pick
+        self._set_music(MusicChoice(title=track_title(path), local_path=path))
+
+    def _play_music(self, path: Path) -> None:
+        self._music_player.setSource(QUrl.fromLocalFile(str(path)))
+        self._music_player.play()
+
+    def _toggle_music_listen(self) -> None:
+        if self._music_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._music_player.stop()
+            return
+        item = self._music_list.currentItem() or self._music_list.item(0)
+        if item is None:
+            return
+        if self._music_list.currentItem() is None:
+            self._music_list.setCurrentItem(item)  # picks it too
+        self._play_music(Path(item.data(Qt.ItemDataRole.UserRole)))
+
+    def _on_music_playback_changed(self, state: QMediaPlayer.PlaybackState) -> None:
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        self._listen_btn.setText("■  Stop" if playing else "▶  Listen")
 
     # --- Export ------------------------------------------------------------
 

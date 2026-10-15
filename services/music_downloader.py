@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -13,6 +14,22 @@ ProgressCallback = Callable[[float, str], None]
 ShouldCancel = Callable[[], bool]
 
 AUDIO_EXTENSIONS = (".mp3", ".m4a", ".opus", ".webm", ".ogg", ".aac", ".wav")
+MUSIC_DIR = ASSETS / "music"
+_VIDEO_ID_SUFFIX = re.compile(r"\s*\[[A-Za-z0-9_-]{6,}\]$")
+
+
+def library_tracks(folder: Optional[Path] = None) -> list[Path]:
+    """Audio files in the music folder (where downloads land), sorted by title."""
+    folder = folder or MUSIC_DIR
+    if not folder.is_dir():
+        return []
+    tracks = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS]
+    return sorted(tracks, key=lambda p: track_title(p).casefold())
+
+
+def track_title(path: Path) -> str:
+    """Display name: the file name without its extension or yt-dlp's "[video id]" suffix."""
+    return _VIDEO_ID_SUFFIX.sub("", Path(path).stem).replace("｜", "|").strip() or Path(path).stem
 
 
 def _looks_like_url(query: str) -> bool:
@@ -138,7 +155,7 @@ def download_instrumental(
     should_cancel: Optional[ShouldCancel] = None,
 ) -> Path:
     """Download instrumental audio via yt-dlp (YouTube search or direct URL)."""
-    out_dir = output_dir or (ASSETS / "music")
+    out_dir = output_dir or MUSIC_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     template = str(out_dir / "%(title).80s [%(id)s].%(ext)s")
     query = search_query.strip()
