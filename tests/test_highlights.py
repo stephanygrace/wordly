@@ -170,7 +170,10 @@ class _FakeClaude:
     def __init__(self, payload: dict, stop_reason: str = "end_turn") -> None:
         self.calls: list[dict] = []
         text = SimpleNamespace(type="text", text=json.dumps(payload))
-        response = SimpleNamespace(stop_reason=stop_reason, content=[text] if stop_reason == "end_turn" else [])
+        usage = SimpleNamespace(input_tokens=34_701, output_tokens=1_463,
+                                cache_creation_input_tokens=0, cache_read_input_tokens=0)
+        response = SimpleNamespace(stop_reason=stop_reason, content=[text] if stop_reason == "end_turn" else [],
+                                   model="claude-opus-5-5", usage=usage)
         create = mock.Mock(side_effect=lambda **kw: self.calls.append(kw) or response)
         self.beta = SimpleNamespace(messages=SimpleNamespace(create=create))
 
@@ -184,8 +187,11 @@ class TestAskClaude(unittest.TestCase):
 
     def test_request_uses_opus_fallback_and_schema(self) -> None:
         fake = _FakeClaude(self.payload)
-        data = hl.ask_claude(_sents([10] * 5), fake)
+        data, usage = hl.ask_claude(_sents([10] * 5), fake)
         self.assertEqual(data["verse"]["reference"], "John 3:16")
+        self.assertEqual((usage.input_tokens, usage.output_tokens), (34_701, 1_463))
+        self.assertAlmostEqual(usage.cost_usd, 34_701 * 4 / 1e6 + 1_463 * 20 / 1e6)
+        self.assertEqual(usage.describe(), "34,701 input + 1,463 output tokens · $0.168")
         call = fake.calls[0]
         self.assertEqual(call["model"], "claude-opus-5-5")
         self.assertEqual(call["betas"], ["server-side-fallback-2026-07-01"])
@@ -214,6 +220,35 @@ class TestAskClaude(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             hl.ask_claude(_sents([10] * 5), _FakeClaude(self.payload, stop_reason="refusal"))
         self.assertIn("declined", str(ctx.exception))
+        self.assertIn("$0.168", str(ctx.exception))  # a refusal still costs tokens
+
+    def test_fallback_model_without_a_price_shows_tokens_only(self) -> None:
+        response = SimpleNamespace(model="claude-some-fallback", usage=SimpleNamespace(input_tokens=1000, output_tokens=10))
+        usage = hl.LuxUsage.from_response(response)
+        self.assertIsNone(usage.cost_usd)
+        self.assertEqual(usage.describe(), "1,000 input + 10 output tokens · cost unknown for claude-some-fallback")
+
+
+class TestLuxLedger(unittest.TestCase):
+    def test_every_answer_is_logged_and_totalled_even_a_refusal(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "lux_usage.jsonl"
+            self.assertEqual(hl.usage_totals(ledger).describe(), "Lux spending so far: $0.00")
+            hl.ask_claude(_sents([10] * 5), _FakeClaude(TestAskClaude.payload), ledger=ledger)
+            with self.assertRaises(RuntimeError):
+                hl.ask_claude(_sents([10] * 5), _FakeClaude(TestAskClaude.payload, stop_reason="refusal"), ledger=ledger)
+            totals = hl.usage_totals(ledger)
+            self.assertEqual((totals.runs, totals.input_tokens, totals.output_tokens), (2, 69_402, 2_926))
+            self.assertEqual(
+                totals.describe(), "Lux spending so far: $0.34 · 2 runs · 69,402 input + 2,926 output tokens"
+            )
+
+    def test_no_ledger_no_file(self) -> None:
+        with mock.patch.object(hl, "record_usage") as record:
+            hl.ask_claude(_sents([10] * 5), _FakeClaude(TestAskClaude.payload))
+        record.assert_not_called()
 
 
 class TestFindHighlights(unittest.TestCase):
@@ -235,6 +270,7 @@ class TestFindHighlights(unittest.TestCase):
         self.assertAlmostEqual(plan.sermon_start, 1200.0, delta=1.0)
         self.assertAlmostEqual(plan.sermon_end, 3600.0, delta=1.0)
         self.assertEqual([h.title for h in plan.highlights], ["one", "two"])
+        self.assertEqual(plan.usage.output_tokens, 1_463)
         self.assertEqual(plan.highlights[0].start, hl.whole_second_start(sermon[9].start, sermon[8].end + 0.02))
         self.assertEqual(steps, sorted(steps))
 

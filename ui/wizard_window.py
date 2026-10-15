@@ -49,7 +49,15 @@ from services.resolve_export import END_PHOTO_S, generate_resolve_project
 from services.resolve_launcher import install_import_script, open_resolve_project, reveal_in_finder
 from services.resolve_template import template_available
 from services.claude_client import MissingApiKey, api_key, save_api_key
-from services.highlights import MAX_TOTAL_S, HighlightPlan, find_highlights, find_sermon, format_clock
+from services.highlights import (
+    LUX_LEDGER,
+    MAX_TOTAL_S,
+    HighlightPlan,
+    find_highlights,
+    find_sermon,
+    format_clock,
+    usage_totals,
+)
 from services.highlights import format_timecode as highlight_timecode
 from services.caption_style import DEFAULT_STYLE_NAME, CaptionStyle, load_caption_styles
 from services.transcribe import Caption, transcribe_clips, whisper_backend_label, whisper_model_name, word_timings
@@ -75,7 +83,7 @@ S_SOURCE, S_HIGHLIGHTS, S_CAPTIONS, S_VERSE_MUSIC, S_EXPORT = range(5)
 # (sidebar name, page title, page subtitle)
 _STEPS = (
     ("Source", "Bring in the service", "Paste a Facebook or YouTube link, or use a video already on this computer."),
-    ("Highlights", "Pick the moments", "Let Claude choose the highlights, or mark your own clips on the player."),
+    ("Highlights", "Pick the moments", "Let Lux choose the highlights, or mark your own clips on the player."),
     ("Captions", "Add captions", "Transcribe the clips, fix any wrong words, and choose how captions look."),
     ("Verse & music", "Verse and music", "The verse sits above the video; the instrumental plays underneath."),
     ("Export", "Review and export", "Check everything, then build the DaVinci Resolve project."),
@@ -656,29 +664,33 @@ class WizardWindow(QMainWindow):
         left.addWidget(self._composer_card)
         left.addStretch(1)
 
-        claude_card = Card(
-            "Let Claude pick",
-            "Claude picks 2–3 highlights (2 minutes max) plus the Bible verse. To narrow the search, "
+        lux_card = Card(
+            "Let Lux pick",
+            "Lux picks 2–3 highlights (2 minutes max) plus the Bible verse. To narrow the search, "
             "trim first: Find sermon cuts out the songs for free, or add a clip around the part to "
-            "scan, and Claude looks only there. With no clips, Claude scans the whole video.",
+            "scan, and Lux looks only there. With no clips, Lux scans the whole video.",
         )
-        set_prop(claude_card, "accent", "true")
+        set_prop(lux_card, "accent", "true")
         self._find_sermon_btn = button(
             "Find sermon",
-            tooltip="Free, no Claude: skips the opening songs and adds the sermon as a clip you can adjust.",
+            tooltip="Free, no Lux: skips the opening songs and adds the sermon as a clip you can adjust.",
             on_click=self._find_sermon,
         )
-        self._find_highlights_btn = button("✦  Find highlights with Claude", "Primary", on_click=self._find_highlights)
-        claude_actions = QHBoxLayout()
-        claude_actions.addWidget(self._find_sermon_btn)
-        claude_actions.addWidget(self._find_highlights_btn, 1)
-        claude_card.body.addLayout(claude_actions)
+        self._find_highlights_btn = button("✦  Let Lux pick highlights", "Primary", on_click=self._find_highlights)
+        lux_actions = QHBoxLayout()
+        lux_actions.addWidget(self._find_sermon_btn)
+        lux_actions.addWidget(self._find_highlights_btn, 1)
+        lux_card.body.addLayout(lux_actions)
         self._highlights_summary = label("", "Notice", wrap=True)
-        set_prop(self._highlights_summary, "tone", "claude")
+        set_prop(self._highlights_summary, "tone", "lux")
         self._highlights_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._highlights_summary.setVisible(False)
-        claude_card.body.addWidget(self._highlights_summary)
-        right.addWidget(claude_card)
+        lux_card.body.addWidget(self._highlights_summary)
+        self._lux_spend = label("", "Faint", wrap=True)
+        self._lux_spend.setToolTip(f"Every Lux run is logged in {LUX_LEDGER.relative_to(LUX_LEDGER.parents[1])}.")
+        lux_card.body.addWidget(self._lux_spend)
+        self._refresh_lux_spend()
+        right.addWidget(lux_card)
 
         clips_card = Card("Clips")
         self._clips_total_pill = label("", "Pill")
@@ -690,7 +702,7 @@ class WizardWindow(QMainWindow):
         self._segment_list.currentRowChanged.connect(self._on_segment_row_changed)
         clips_card.body.addWidget(self._segment_list)
         self._clips_empty = label(
-            "No clips yet. Ask Claude, or mark a start and end on the player and click Add clip.",
+            "No clips yet. Ask Lux, or mark a start and end on the player and click Add clip.",
             "Muted",
             wrap=True,
         )
@@ -1202,10 +1214,10 @@ class WizardWindow(QMainWindow):
         verse_card.body.addWidget(self._verse_ref_edit)
         verse_card.body.addWidget(label("Verse text", "FieldLabel"))
         verse_card.body.addWidget(self._verse_edit)
-        self._verse_claude_note = label("", "Notice", wrap=True)
-        set_prop(self._verse_claude_note, "tone", "claude")
-        self._verse_claude_note.setVisible(False)
-        verse_card.body.addWidget(self._verse_claude_note)
+        self._verse_lux_note = label("", "Notice", wrap=True)
+        set_prop(self._verse_lux_note, "tone", "lux")
+        self._verse_lux_note.setVisible(False)
+        verse_card.body.addWidget(self._verse_lux_note)
         left.addWidget(verse_card)
 
         photo_card = Card(
@@ -1855,7 +1867,7 @@ class WizardWindow(QMainWindow):
             self._highlights_summary.setText(
                 f"<b>Sermon found: {format_clock(start)}–{format_clock(end)}</b> ({_short_clock(end - start)}). "
                 "Check the start and end on the player — the end can run into the closing prayer — "
-                "then let Claude pick highlights from it."
+                "then let Lux pick highlights from it."
             )
             self._highlights_summary.setVisible(True)
             self._on_timestamp_fields_changed()
@@ -1877,7 +1889,7 @@ class WizardWindow(QMainWindow):
         if not sermon or not sermon.is_file():
             QMessageBox.warning(self, "Wordly", "Load the service video first.")
             return
-        # Trimmed clips mark where Claude should look; without any it scans the whole video.
+        # Trimmed clips mark where Lux should look; without any it scans the whole video.
         ranges: list[tuple[float, float]] = []
         for seg in self._project.segments:
             try:
@@ -1890,7 +1902,7 @@ class WizardWindow(QMainWindow):
             answer = QMessageBox.question(
                 self,
                 "Wordly",
-                f"Claude will look for highlights only inside your trimmed clips "
+                f"Lux will look for highlights only inside your trimmed clips "
                 f"({_short_clock(total)} in total) and replace {parts} with its picks.\n\n"
                 "To scan the whole video instead, remove the clips first.",
             )
@@ -1906,9 +1918,11 @@ class WizardWindow(QMainWindow):
                 ranges=ranges or None,
                 progress_cb=progress_cb,
                 should_cancel=should_cancel,
+                ledger=LUX_LEDGER,
             )
 
         def on_fail(message: str) -> None:
+            self._refresh_lux_spend()  # a failed answer is still billed
             if message and message != "Cancelled":
                 QMessageBox.warning(self, "Wordly", f"Couldn't find highlights:\n{message}")
 
@@ -1917,13 +1931,17 @@ class WizardWindow(QMainWindow):
             on_ok=self._apply_highlights,
             on_fail=on_fail,
             message=(
-                "Transcribing your trimmed part…"
+                "Lux is listening to your trimmed part…"
                 if ranges
-                else "Transcribing the service — a few minutes the first time…"
+                else "Lux is listening to the whole service — a few minutes the first time…"
             ),
         )
 
+    def _refresh_lux_spend(self) -> None:
+        self._lux_spend.setText(usage_totals(LUX_LEDGER).describe())
+
     def _apply_highlights(self, plan: HighlightPlan) -> None:
+        self._refresh_lux_spend()
         self._project.segments = [
             ClipSegment(highlight_timecode(h.start), highlight_timecode(h.end), h.title) for h in plan.highlights
         ]
@@ -1931,16 +1949,16 @@ class WizardWindow(QMainWindow):
         self._refresh_segment_list()
         self._on_segment_row_changed(-1)
         if plan.verse_reference and not (self._verse_ref_edit.text().strip() or self._verse_edit.toPlainText().strip()):
-            # Pre-fill the verse step; the wording is from Claude, so it should be checked.
+            # Pre-fill the verse step; the wording is from Lux, so it should be checked.
             self._verse_ref_edit.setText(plan.verse_reference)
             self._verse_edit.setPlainText(plan.verse_text)
             reason = f" {plan.verse_reason}." if plan.verse_reason else ""
-            self._verse_claude_note.setText(
-                f"✦ Suggested by Claude.{reason} Check the wording against your Bible translation."
+            self._verse_lux_note.setText(
+                f"✦ Suggested by Lux.{reason} Check the wording against your Bible translation."
             )
-            self._verse_claude_note.setVisible(True)
+            self._verse_lux_note.setVisible(True)
         lines = []
-        sermon = f"Sermon {format_clock(plan.sermon_start)}–{format_clock(plan.sermon_end)}"
+        sermon = f"Lux scanned {format_clock(plan.sermon_start)}–{format_clock(plan.sermon_end)}"
         lines.append(f"<b>{sermon}</b>" + (f" · “{plan.sermon_title}”" if plan.sermon_title else ""))
         for i, h in enumerate(plan.highlights, start=1):
             lines.append(f"{i}. <b>{h.title}</b> — {h.reason}")
@@ -1948,6 +1966,8 @@ class WizardWindow(QMainWindow):
         if plan.verse_reference:
             lines.append(f"Verse: {plan.verse_reference}")
         lines.extend(plan.notes)
+        if plan.usage is not None:
+            lines.append(f"<span style='opacity:0.75'>Lux used {plan.usage.describe()}</span>")
         self._highlights_summary.setText("<br>".join(lines))
         self._highlights_summary.setVisible(True)
         self._on_timestamp_fields_changed()

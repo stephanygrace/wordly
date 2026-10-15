@@ -136,7 +136,7 @@ def stylesheet() -> str:
         font-size: 12px; color: {MUTED};
         background-color: {SURFACE_RAISED}; border-radius: 8px; padding: 8px 10px;
     }}
-    QLabel#Notice[tone="claude"] {{ color: #cfd4ff; background-color: #20264a; }}
+    QLabel#Notice[tone="lux"] {{ color: #cfd4ff; background-color: #20264a; }}
     QLabel#Notice[tone="ok"] {{ color: #bfe8d4; background-color: {SUCCESS_SOFT}; }}
     QLabel#Notice[tone="warn"] {{ color: #f3d9a4; background-color: #3a2e17; }}
 

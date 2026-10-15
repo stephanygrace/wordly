@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from services.claude_client import MissingApiKey
-from services.highlights import Highlight, HighlightPlan
+from services.highlights import Highlight, HighlightPlan, LuxUsage
 
 
 class TestFindHighlightsInWizard(unittest.TestCase):
@@ -39,6 +39,7 @@ class TestFindHighlightsInWizard(unittest.TestCase):
             sermon_title="Joseph",
             sermon_start=2400,
             sermon_end=6600,
+            usage=LuxUsage("claude-opus-5-5", input_tokens=34_701, output_tokens=1_463),
         )
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "service.mp4"
@@ -58,6 +59,9 @@ class TestFindHighlightsInWizard(unittest.TestCase):
             )
             self.assertEqual(window._segment_list.count(), 2)
             self.assertEqual(window._verse_ref_edit.text(), "Genesis 50:20")
+            self.assertIn("Lux used 34,701 input + 1,463 output tokens · $0.168", window._highlights_summary.text())
+            self.assertEqual(finder.call_args.kwargs["ledger"], ww.LUX_LEDGER)
+            self.assertTrue(window._lux_spend.text().startswith("Lux spending so far: $"))
             self.assertTrue(window._verse_edit.toPlainText().startswith("You intended"))
             self.assertEqual(window._project.selected_verse.reference, "Genesis 50:20")
             self.assertIn("Total 85s", window._highlights_summary.text())
@@ -72,7 +76,7 @@ class TestFindHighlightsInWizard(unittest.TestCase):
             window = ww.WizardWindow()
             window._project.sermon_path = video
             with mock.patch.object(ww, "find_sermon", return_value=(2253.0, 6735.0)) as finder, mock.patch.object(
-                ww, "api_key", side_effect=AssertionError("Find sermon must not need Claude")
+                ww, "api_key", side_effect=AssertionError("Find sermon must not need Lux")
             ):
                 window._find_sermon()
                 self._wait(window)

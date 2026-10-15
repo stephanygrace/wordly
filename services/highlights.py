@@ -1,4 +1,6 @@
-"""Pick a sermon's highlights automatically: Whisper finds the words, Claude picks the moments.
+"""Pick a sermon's highlights automatically: Whisper finds the words, Lux picks the moments.
+
+Lux is Wordly's name for the assistant; it runs on Claude Opus 5.5.
 
 1. Transcribe the part to scan with a fast Whisper model (Tagalog mode keeps
    Taglish as spoken), in 10-minute chunks so progress and cancel work; each
@@ -65,6 +67,103 @@ class Highlight:
         return self.end - self.start
 
 
+# USD per million tokens: input, output, cache write (5 min), cache read.
+PRICES_PER_MTOK = {
+    "claude-opus-5-5": (4.0, 20.0, 5.0, 0.20),
+}
+
+
+@dataclass
+class LuxUsage:
+    """Tokens one Lux request used, and what they cost."""
+
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+
+    @classmethod
+    def from_response(cls, response) -> "LuxUsage":
+        usage = getattr(response, "usage", None)
+        tokens = lambda name: int(getattr(usage, name, 0) or 0)  # noqa: E731
+        return cls(
+            model=str(getattr(response, "model", "") or CLAUDE_MODEL),
+            input_tokens=tokens("input_tokens"),
+            output_tokens=tokens("output_tokens"),
+            cache_write_tokens=tokens("cache_creation_input_tokens"),
+            cache_read_tokens=tokens("cache_read_input_tokens"),
+        )
+
+    @property
+    def cost_usd(self) -> float | None:
+        prices = PRICES_PER_MTOK.get(self.model)
+        if prices is None:
+            return None
+        counts = (self.input_tokens, self.output_tokens, self.cache_write_tokens, self.cache_read_tokens)
+        return sum(n * price for n, price in zip(counts, prices)) / 1_000_000
+
+    def describe(self) -> str:
+        """e.g. "34,701 input + 1,463 output tokens · $0.168"."""
+        text = f"{self.input_tokens + self.cache_write_tokens + self.cache_read_tokens:,} input + {self.output_tokens:,} output tokens"
+        cost = self.cost_usd
+        text += f" · ${cost:.3f}" if cost is not None else f" · cost unknown for {self.model}"
+        return text
+
+
+# Every Lux request's tokens and cost, one JSON line each (temp/ is git-ignored).
+LUX_LEDGER = TEMP / "lux_usage.jsonl"
+
+
+@dataclass
+class LuxTotals:
+    runs: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+
+    def describe(self) -> str:
+        if not self.runs:
+            return "Lux spending so far: $0.00"
+        runs = "1 run" if self.runs == 1 else f"{self.runs} runs"
+        return (
+            f"Lux spending so far: ${self.cost_usd:.2f} · {runs} · "
+            f"{self.input_tokens:,} input + {self.output_tokens:,} output tokens"
+        )
+
+
+def record_usage(usage: LuxUsage, ledger: Path) -> None:
+    import time
+
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "model": usage.model,
+        "input_tokens": usage.input_tokens + usage.cache_write_tokens + usage.cache_read_tokens,
+        "output_tokens": usage.output_tokens,
+        "cost_usd": usage.cost_usd,
+    }
+    with ledger.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+
+def usage_totals(ledger: Path | None = None) -> LuxTotals:
+    ledger = ledger or LUX_LEDGER
+    totals = LuxTotals()
+    if not ledger.is_file():
+        return totals
+    for line in ledger.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        totals.runs += 1
+        totals.input_tokens += int(row.get("input_tokens") or 0)
+        totals.output_tokens += int(row.get("output_tokens") or 0)
+        totals.cost_usd += float(row.get("cost_usd") or 0.0)
+    return totals
+
+
 @dataclass
 class HighlightPlan:
     highlights: list[Highlight]
@@ -75,6 +174,7 @@ class HighlightPlan:
     sermon_start: float = 0.0
     sermon_end: float = 0.0
     notes: list[str] = field(default_factory=list)
+    usage: LuxUsage | None = None
 
     @property
     def total_s(self) -> float:
@@ -375,7 +475,7 @@ def locate_sermon(words: list[Word]) -> tuple[float, float] | None:
 
 
 def find_sermon(src: Path, *, progress_cb: ProgressCb = None, should_cancel: ShouldCancel = None) -> tuple[float, float]:
-    """Free (no Claude): transcribe the service and return the sermon's start/end in seconds."""
+    """Free (no Lux): transcribe the service and return the sermon's start/end in seconds."""
     words = transcribe_service(src, progress_cb=progress_cb, should_cancel=should_cancel)
     _progress(progress_cb, 0.9, "Finding the sermon…")
     bounds = locate_sermon(words)
@@ -459,8 +559,11 @@ OUTPUT_SCHEMA = {
 }
 
 
-def ask_claude(sents: list[Sentence], claude=None) -> dict:
-    """Send the numbered sermon to Claude Opus 5.5 and return its parsed JSON choice."""
+def ask_claude(sents: list[Sentence], claude=None, *, ledger: Path | None = None) -> tuple[dict, LuxUsage]:
+    """Send the numbered sermon to Claude Opus 5.5; return its parsed JSON choice and the tokens used.
+
+    With *ledger*, the tokens are recorded there even if the answer turns out unusable.
+    """
     if claude is None:
         from services.claude_client import client
 
@@ -491,13 +594,18 @@ def ask_claude(sents: list[Sentence], claude=None) -> dict:
             ) from exc
         raise
     except anthropic.PermissionDeniedError as exc:
-        raise RuntimeError("This API key can't use Claude Opus 5.5 (permission denied).") from exc
+        raise RuntimeError("This API key can't use the model Lux runs on (Claude Opus 5.5).") from exc
+    usage = LuxUsage.from_response(response)
+    if ledger is not None:
+        record_usage(usage, ledger)
     if response.stop_reason == "refusal":
-        raise RuntimeError("Claude declined to pick highlights for this sermon. Choose timestamps manually.")
+        raise RuntimeError(
+            f"Lux declined to pick highlights for this sermon. Choose timestamps manually. (Used {usage.describe()}.)"
+        )
     if response.stop_reason == "max_tokens":
-        raise RuntimeError("Claude's answer was cut off. Try again.")
+        raise RuntimeError(f"Lux's answer was cut off. Try again. (Used {usage.describe()}.)")
     text = next((b.text for b in response.content if b.type == "text"), "")
-    return json.loads(text)
+    return json.loads(text), usage
 
 
 # --- 4. Validate --------------------------------------------------------------------
@@ -573,8 +681,9 @@ def find_highlights(
     progress_cb: ProgressCb = None,
     should_cancel: ShouldCancel = None,
     claude=None,
+    ledger: Path | None = None,
 ) -> HighlightPlan:
-    """Highlights for one service video.
+    """Lux's highlights for one service video.
 
     *ranges* are the parts the user trimmed (seconds); only those are scanned.
     Without them the whole video is transcribed and the sermon found automatically.
@@ -597,10 +706,14 @@ def find_highlights(
         raise RuntimeError("Couldn't find enough speech to pick highlights from. Choose timestamps manually.")
     if should_cancel is not None and should_cancel():
         raise RuntimeError("Cancelled")
-    _progress(progress_cb, 0.7, f"Asking Claude to pick highlights from {where} ({format_clock(start)}–{format_clock(end)})…")
-    plan = build_plan(ask_claude(sents, claude), sents)
+    _progress(progress_cb, 0.7, f"Lux is picking highlights from {where} ({format_clock(start)}–{format_clock(end)})…")
+    data, usage = ask_claude(sents, claude, ledger=ledger)
+    plan = build_plan(data, sents)
     plan.sermon_start, plan.sermon_end = start, end
+    plan.usage = usage
     if not plan.highlights:
-        raise RuntimeError("Claude's suggestions didn't fit the reel rules. Choose timestamps manually.")
-    _progress(progress_cb, 1.0, f"Found {len(plan.highlights)} highlights ({plan.total_s:.0f} s)")
+        raise RuntimeError(
+            f"Lux's suggestions didn't fit the reel rules. Choose timestamps manually. (Used {usage.describe()}.)"
+        )
+    _progress(progress_cb, 1.0, f"Lux found {len(plan.highlights)} highlights ({plan.total_s:.0f} s) · {usage.describe()}")
     return plan
