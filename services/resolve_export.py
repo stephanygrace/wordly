@@ -35,6 +35,7 @@ from services.reel_layout import (
     VerseLine,
     join_backgrounds,
     render_background,
+    render_end_card,
     render_main,
     stabilize_if_shaky,
     verse_lines,
@@ -455,6 +456,7 @@ def _build_fcpxml(
     background: Path | None = None,
     verse: list[VerseLine] | None = None,
     handle_s: float = 0.0,
+    verse_duration_s: float | None = None,
 ) -> Element:
     """The Resolve timeline.
 
@@ -595,7 +597,7 @@ def _build_fcpxml(
             "asset-clip",
             ref=asset_id,
             offset=_frames_to_fcpxml(offset_f),
-            name=f"Clip{idx + 1:03d}",
+            name="End photo" if clip_paths[idx].stem == END_CARD_STEM else f"Clip{idx + 1:03d}",
             duration=_frames_to_fcpxml(visible_f),
             start=_frames_to_fcpxml(h_f),
             tcFormat="NDF",
@@ -621,7 +623,7 @@ def _build_fcpxml(
                 clip_el,
                 verse,
                 effect_id=caption_effect_id,
-                duration_s=timeline_duration_s,
+                duration_s=verse_duration_s or timeline_duration_s,
                 offset=local_start,
             )
         if idx == 0 and music_id is not None:
@@ -650,6 +652,10 @@ def _build_fcpxml(
 
     return root
 
+
+# The end card: a still photo for the last seconds of the reel, with the music.
+END_CARD_STEM = "EndPhoto"
+END_PHOTO_S = 5.0
 
 # Final Cut Pro's built-in transitions; Resolve imports them as its Cross Dissolve.
 CROSS_DISSOLVE_UID = "FxPlug:4731E73A-8DAC-4113-9A30-AE85B1761265"
@@ -771,14 +777,28 @@ def generate_resolve_project(
         if len(mains) == len(clip_paths):
             # Zoomed head-to-waist versions (same length and audio) replace the originals.
             timeline_clips = mains
+    sermon_duration_s = timeline_duration_s
+    timeline_durations = list(durations)
+    if project.end_photo is not None and project.end_photo.is_file():
+        _progress(progress_cb, 0.875, "Adding the end photo…")
+        # 5 s on screen, plus the hidden frames the fade from the last clip uses.
+        end_card = render_end_card(
+            project.end_photo,
+            bundle_dir / "media" / f"{END_CARD_STEM}.mp4",
+            duration_s=END_PHOTO_S + 2 * CLIP_HANDLE_S,
+        )
+        timeline_clips = [*timeline_clips, end_card]
+        timeline_durations.append(_safe_duration(end_card))
+        backgrounds = [*backgrounds, end_card] if backgrounds else backgrounds
+        timeline_duration_s += END_PHOTO_S
     if project.reel_layout and backgrounds and len(backgrounds) == len(timeline_clips):
         _progress(progress_cb, 0.88, "Blending the background between clips…")
         # One track with the fades baked in, so it dissolves along with the clips.
-        handles = [visible_span(d, CLIP_HANDLE_S)[0] for d in durations]
+        handles = [visible_span(d, CLIP_HANDLE_S)[0] for d in timeline_durations]
         background = join_backgrounds(
             backgrounds,
             bundle_dir / "media" / "Background.mp4",
-            durations_s=durations,
+            durations_s=timeline_durations,
             handle_s=min(handles) if handles else 0.0,
         )
 
@@ -788,7 +808,7 @@ def generate_resolve_project(
         verse_srt,
         project.selected_verse.reference,
         project.selected_verse.text,
-        timeline_duration_s,
+        sermon_duration_s,
     )
 
     _progress(progress_cb, 0.92, "Writing FCPXML timeline…")
@@ -802,6 +822,8 @@ def generate_resolve_project(
         background=background,
         verse=verse,
         handle_s=CLIP_HANDLE_S,
+        # The verse stays over the sermon; the end photo shows on its own.
+        verse_duration_s=sermon_duration_s,
     )
     timeline_path = bundle_dir / f"{stem}.fcpxml"
     _write_fcpxml(timeline_path, root)
@@ -831,6 +853,7 @@ def generate_resolve_project(
             "verse_txt": str(verse_txt) if verse_txt else None,
             "verse_srt": str(verse_srt),
             "captions_srt": str(captions_srt) if captions_srt else None,
+            "end_photo": str(project.end_photo) if project.end_photo else None,
         },
         "captions": caption_count,
         "caption_style": caption_style.name if clip_captions else None,

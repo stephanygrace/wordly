@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QCursor, QKeySequence, QMoveEvent, QResizeEvent, QShortcut
+from PySide6.QtGui import QCursor, QKeySequence, QMoveEvent, QPixmap, QResizeEvent, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -42,8 +42,9 @@ from models.project import ClipSegment, MusicChoice, ProjectState, VerseChoice
 from services.downloader import download_backend_description, download_facebook_video
 from services.multi_clip import export_clips, merge_clips
 from services.music_downloader import AUDIO_EXTENSIONS, download_instrumental
+from services.photo_downloader import IMAGE_EXTENSIONS, download_photo
 from services.trimmer import ffprobe_duration_seconds
-from services.resolve_export import generate_resolve_project
+from services.resolve_export import END_PHOTO_S, generate_resolve_project
 from services.resolve_launcher import install_import_script, open_resolve_project, reveal_in_finder
 from services.resolve_template import template_available
 from services.claude_client import MissingApiKey, api_key, save_api_key
@@ -924,7 +925,34 @@ class WizardWindow(QMainWindow):
         self._verse_claude_note.setVisible(False)
         verse_card.body.addWidget(self._verse_claude_note)
         left.addWidget(verse_card)
+
+        photo_card = Card(
+            "End photo",
+            f"Optional. Shown for the last {END_PHOTO_S:g} seconds with the music; the music ends with it.",
+        )
+        self._end_photo_url_edit = QLineEdit()
+        self._end_photo_url_edit.setPlaceholderText("Facebook photo link")
+        self._end_photo_url_edit.setClearButtonEnabled(True)
+        self._end_photo_url_edit.returnPressed.connect(self._download_end_photo)
+        self._end_photo_download_btn = button("Get photo", "Primary", on_click=self._download_end_photo)
+        photo_url_row = QHBoxLayout()
+        photo_url_row.setSpacing(8)
+        photo_url_row.addWidget(self._end_photo_url_edit, 1)
+        photo_url_row.addWidget(self._end_photo_download_btn)
+        photo_card.body.addLayout(photo_url_row)
+        self._end_photo_browse_btn = button("Choose image…", on_click=self._browse_end_photo)
+        self._end_photo_remove_btn = button("Remove", "Ghost", on_click=lambda: self._set_end_photo(None))
+        photo_actions = QHBoxLayout()
+        photo_actions.addWidget(self._end_photo_browse_btn)
+        photo_actions.addWidget(self._end_photo_remove_btn)
+        photo_actions.addStretch(1)
+        photo_card.body.addLayout(photo_actions)
+        self._end_photo_preview = QLabel()
+        self._end_photo_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        photo_card.body.addWidget(self._end_photo_preview)
+        left.addWidget(photo_card)
         left.addStretch(1)
+        self._show_end_photo(self._project.end_photo)
 
         music_card = Card("Instrumental", "Plays quietly under the whole reel.")
         self._music_url_edit = QLineEdit()
@@ -989,6 +1017,7 @@ class WizardWindow(QMainWindow):
             ("captions", "Captions", S_CAPTIONS),
             ("verse", "Verse", S_VERSE_MUSIC),
             ("music", "Music", S_VERSE_MUSIC),
+            ("end_photo", "End photo", S_VERSE_MUSIC),
         ):
             row_widget = SummaryRow(title)
             row_widget.edit_clicked.connect(lambda step=step: self._go_to_step(step))
@@ -1154,6 +1183,8 @@ class WizardWindow(QMainWindow):
             self._find_highlights_btn,
             self._download_music_url_btn,
             self._local_music_btn,
+            self._end_photo_download_btn,
+            self._end_photo_browse_btn,
             self._open_resolve_btn,
         ):
             btn.setEnabled(not self._busy)
@@ -1261,6 +1292,10 @@ class WizardWindow(QMainWindow):
             rows["music"].set_value(p.selected_music.title)
         else:
             rows["music"].set_value("Missing", "todo")
+        if p.end_photo is not None:
+            rows["end_photo"].set_value(f"{p.end_photo.name} · last {END_PHOTO_S:g} s")
+        else:
+            rows["end_photo"].set_value("None", "off")
 
         name = self._project_name_edit.text().strip() or default_export_project_name()
         self._export_path_label.setText(f"Saved to exports/{name}/{name}.fcpxml")
@@ -1839,6 +1874,53 @@ class WizardWindow(QMainWindow):
             QMessageBox.warning(self, "Wordly", "Please choose a supported audio file.")
             return
         self._set_music(MusicChoice(title=p.stem, local_path=p))
+
+    def _download_end_photo(self) -> None:
+        url = self._end_photo_url_edit.text().strip()
+        if not url:
+            QMessageBox.warning(self, "Wordly", "Paste the Facebook photo link first.")
+            return
+
+        def job(*, progress_cb, should_cancel):
+            progress_cb(-1.0, "Getting the photo…")
+            return download_photo(url)
+
+        def on_fail(message: str) -> None:
+            if message and message != "Cancelled":
+                QMessageBox.warning(self, "Wordly", f"Couldn't get the photo:\n{message}")
+
+        self._run_job(job, on_ok=self._set_end_photo, on_fail=on_fail, message="Getting the photo…")
+
+    def _browse_end_photo(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose the end photo",
+            str(DOWNLOADS),
+            "Images (*.jpg *.jpeg *.png *.webp);;All files (*)",
+        )
+        if not path:
+            return
+        p = Path(path).resolve()
+        if p.suffix.lower() not in IMAGE_EXTENSIONS:
+            QMessageBox.warning(self, "Wordly", "Please choose a JPG, PNG or WebP image.")
+            return
+        self._set_end_photo(p)
+
+    def _set_end_photo(self, path: Path | None) -> None:
+        self._project.end_photo = path
+        self._show_end_photo(path)
+        self._update_nav()
+
+    def _show_end_photo(self, path: Path | None) -> None:
+        pixmap = QPixmap(str(path)) if path is not None else QPixmap()
+        if path is not None and not pixmap.isNull():
+            self._end_photo_preview.setPixmap(
+                pixmap.scaled(QSize(220, 220), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            )
+        else:
+            self._end_photo_preview.clear()
+        self._end_photo_preview.setVisible(path is not None)
+        self._end_photo_remove_btn.setVisible(path is not None)
 
     def _set_music(self, music: MusicChoice) -> None:
         self._project.selected_music = music

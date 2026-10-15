@@ -315,6 +315,37 @@ def join_backgrounds(backgrounds: list[Path], dest: Path, *, durations_s: list[f
     return dest
 
 
+def end_card_filter(layout: ReelLayout = DEFAULT_LAYOUT) -> str:
+    """ffmpeg filter for the end card: the photo fitted to the frame over a blurred, darkened copy."""
+    w, h = layout.width, layout.height
+    return (
+        f"[0:v]split[a][b];"
+        f"[a]{background_filter(layout).replace(f',fps={DEFAULT_FPS:g},format=yuv420p', '')}[bg];"
+        f"[b]scale={w}:{h}:force_original_aspect_ratio=decrease[fg];"
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,fps={DEFAULT_FPS:g},format=yuv420p[out]"
+    )
+
+
+def render_end_card(photo: Path, dest: Path, *, duration_s: float, layout: ReelLayout = DEFAULT_LAYOUT) -> Path:
+    """A still *photo* as a video clip in the reel's frame, with a silent audio track
+    (so it cross-fades like the sermon clips)."""
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-loop", "1", "-framerate", f"{DEFAULT_FPS:g}", "-t", f"{duration_s + 1:.3f}", "-i", str(photo),
+            "-f", "lavfi", "-t", f"{duration_s:.3f}", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-filter_complex", end_card_filter(layout), "-map", "[out]", "-map", "1:a",
+            # Exactly this many frames, so the card lasts exactly its length on the timeline.
+            "-frames:v", str(round(duration_s * DEFAULT_FPS)),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-tune", "stillimage",
+            "-c:a", "aac", str(dest),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return dest
+
+
 def render_main(
     src: Path,
     dest: Path,
