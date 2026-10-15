@@ -1,12 +1,14 @@
 """Pick a sermon's highlights automatically: Whisper finds the words, Claude picks the moments.
 
-1. Transcribe the whole service with a fast Whisper model (Tagalog mode keeps
-   Taglish as spoken), in chunks so progress and cancel work; cached per video.
-2. Locate the sermon: the longest stretch of dense, real speech (worship songs
+1. Transcribe the part to scan with a fast Whisper model (Tagalog mode keeps
+   Taglish as spoken), in 10-minute chunks so progress and cancel work; each
+   chunk is cached, so nothing is transcribed twice.
+2. Scan range: the ranges the user trimmed, or else the sermon located
+   automatically as the longest stretch of dense, real speech (worship songs
    come out as sparse or repeated "Amen. Amen." text).
-3. Number the sermon's sentences with their start time and length, and ask
-   Claude Opus 5.5 for 2-3 self-contained highlights (sentence ranges) plus the
-   Bible verse the sermon is built on.
+3. Number the sentences with their start time and length, and ask Claude for
+   2-3 self-contained highlights (sentence ranges) plus the Bible verse the
+   sermon is built on.
 4. Validate in code: 2-3 clips, 12-60 s each, no overlaps, at most 120 s total.
 """
 
@@ -119,10 +121,18 @@ def whole_second_end(last_word_end: float, latest: float = math.inf) -> float:
 # --- 1. Transcript ------------------------------------------------------------
 
 
-def _cache_path(src: Path) -> Path:
+def _cache_key(src: Path) -> str:
     stat = src.stat()
-    key = hashlib.sha1(f"{src.resolve()}|{stat.st_size}|{int(stat.st_mtime)}".encode()).hexdigest()[:16]
-    return TRANSCRIPT_CACHE / f"{key}.json"
+    return hashlib.sha1(f"{src.resolve()}|{stat.st_size}|{int(stat.st_mtime)}".encode()).hexdigest()[:16]
+
+
+def _cache_path(src: Path) -> Path:
+    """Whole-service transcript saved by earlier versions (still used when present)."""
+    return TRANSCRIPT_CACHE / f"{_cache_key(src)}.json"
+
+
+def _chunk_cache_path(src: Path, index: int) -> Path:
+    return TRANSCRIPT_CACHE / f"{_cache_key(src)}_{index:03d}.json"
 
 
 def _media_duration(src: Path) -> float:
@@ -135,25 +145,49 @@ def _media_duration(src: Path) -> float:
     return float(out)
 
 
-def transcribe_service(src: Path, *, progress_cb: ProgressCb = None, should_cancel: ShouldCancel = None) -> list[Word]:
-    """Word-level transcript of a whole service (cached per video file)."""
-    cache = _cache_path(src)
-    if cache.is_file():
+def _in_ranges(word: Word, ranges: list[tuple[float, float]]) -> bool:
+    return any(a <= word.start < b for a, b in ranges)
+
+
+def transcribe_service(
+    src: Path,
+    *,
+    ranges: list[tuple[float, float]] | None = None,
+    progress_cb: ProgressCb = None,
+    should_cancel: ShouldCancel = None,
+) -> list[Word]:
+    """Word-level transcript of *ranges* of the video (default: all of it).
+
+    Only the 10-minute chunks the ranges touch are transcribed, and each chunk is
+    cached, so scanning a trimmed part is faster and nothing is heard twice.
+    """
+    legacy = _cache_path(src)
+    if legacy.is_file():
         _progress(progress_cb, 0.6, "Using saved transcript…")
-        return [Word(*w) for w in json.loads(cache.read_text(encoding="utf-8"))]
+        words = [Word(*w) for w in json.loads(legacy.read_text(encoding="utf-8"))]
+        return [w for w in words if ranges is None or _in_ranges(w, ranges)]
 
     duration = _media_duration(src)
-    chunks = max(1, math.ceil(duration / CHUNK_S))
+    spans = ranges or [(0.0, duration)]
+    needed = sorted(
+        {i for a, b in spans for i in range(int(a // CHUNK_S), max(int(a // CHUNK_S) + 1, math.ceil(b / CHUNK_S)))}
+    )
     words: list[Word] = []
+    TRANSCRIPT_CACHE.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="wordly_service_") as tmp:
-        for i in range(chunks):
+        for k, i in enumerate(needed):
             if should_cancel is not None and should_cancel():
                 raise RuntimeError("Cancelled")
             offset = i * CHUNK_S
+            cache = _chunk_cache_path(src, i)
+            if cache.is_file():
+                words.extend(Word(*w) for w in json.loads(cache.read_text(encoding="utf-8")))
+                continue
             _progress(
                 progress_cb,
-                0.6 * i / chunks,
-                f"Listening to the service — {format_clock(offset)} of {format_clock(duration)}…",
+                0.6 * k / len(needed),
+                f"Listening — {format_clock(offset)} to {format_clock(min(duration, offset + CHUNK_S))} "
+                f"(part {k + 1} of {len(needed)})…",
             )
             audio = Path(tmp) / f"chunk_{i:03d}.wav"
             subprocess.run(
@@ -164,11 +198,13 @@ def transcribe_service(src: Path, *, progress_cb: ProgressCb = None, should_canc
                 check=True,
                 capture_output=True,
             )
-            for w in transcribe_words(audio, model=SERVICE_WHISPER_MODEL):
-                words.append(Word(w.start + offset, w.end + offset, w.text))
-    TRANSCRIPT_CACHE.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps([[w.start, w.end, w.text] for w in words]), encoding="utf-8")
-    return words
+            chunk = [
+                Word(w.start + offset, w.end + offset, w.text)
+                for w in transcribe_words(audio, model=SERVICE_WHISPER_MODEL)
+            ]
+            cache.write_text(json.dumps([[w.start, w.end, w.text] for w in chunk]), encoding="utf-8")
+            words.extend(chunk)
+    return [w for w in words if _in_ranges(w, spans)]
 
 
 # --- 2. Where is the sermon? -----------------------------------------------------
@@ -533,24 +569,35 @@ def build_plan(data: dict, sents: list[Sentence]) -> HighlightPlan:
 def find_highlights(
     src: Path,
     *,
+    ranges: list[tuple[float, float]] | None = None,
     progress_cb: ProgressCb = None,
     should_cancel: ShouldCancel = None,
     claude=None,
 ) -> HighlightPlan:
-    """The whole pipeline for one service video."""
-    words = transcribe_service(src, progress_cb=progress_cb, should_cancel=should_cancel)
-    _progress(progress_cb, 0.65, "Finding the sermon…")
-    start, end = locate_sermon(words) or find_sermon_window(words)
-    sents = sentences(words, start, end)
+    """Highlights for one service video.
+
+    *ranges* are the parts the user trimmed (seconds); only those are scanned.
+    Without them the whole video is transcribed and the sermon found automatically.
+    """
+    words = transcribe_service(src, ranges=ranges, progress_cb=progress_cb, should_cancel=should_cancel)
+    if ranges:
+        spans = sorted(ranges)
+        sents: list[Sentence] = []
+        for a, b in spans:
+            for s in sentences(words, a, b):
+                sents.append(Sentence(len(sents) + 1, s.start, s.end, s.text))
+        start, end = spans[0][0], spans[-1][1]
+        where = "your trimmed part" if len(spans) == 1 else f"your {len(spans)} trimmed parts"
+    else:
+        _progress(progress_cb, 0.65, "Finding the sermon…")
+        start, end = locate_sermon(words) or find_sermon_window(words)
+        sents = sentences(words, start, end)
+        where = "the sermon"
     if len(sents) < 10:
         raise RuntimeError("Couldn't find enough speech to pick highlights from. Choose timestamps manually.")
     if should_cancel is not None and should_cancel():
         raise RuntimeError("Cancelled")
-    _progress(
-        progress_cb,
-        0.7,
-        f"Asking Claude to pick highlights from the sermon ({format_clock(start)}–{format_clock(end)})…",
-    )
+    _progress(progress_cb, 0.7, f"Asking Claude to pick highlights from {where} ({format_clock(start)}–{format_clock(end)})…")
     plan = build_plan(ask_claude(sents, claude), sents)
     plan.sermon_start, plan.sermon_end = start, end
     if not plan.highlights:

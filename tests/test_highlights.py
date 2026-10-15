@@ -256,5 +256,54 @@ class TestFindHighlights(unittest.TestCase):
 
 
 
+class TestTrimmedScan(unittest.TestCase):
+    def test_only_chunks_touched_by_the_trim_are_transcribed_and_cached(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        heard: list[float] = []
+
+        def fake_ffmpeg(cmd, **_kw):
+            heard.append(float(cmd[cmd.index("-ss") + 1]))
+            Path(cmd[-1]).write_bytes(b"wav")
+            return SimpleNamespace(returncode=0)
+
+        def fake_whisper(audio, model=None):
+            return [Word(5.0, 5.5, " hello"), Word(400.0, 400.5, " world.")]
+
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "service.mp4"
+            video.write_bytes(b"x")
+            with mock.patch.object(hl, "TRANSCRIPT_CACHE", Path(tmp) / "cache"), mock.patch.object(
+                hl, "_media_duration", return_value=7200.0
+            ), mock.patch.object(hl.subprocess, "run", side_effect=fake_ffmpeg), mock.patch.object(
+                hl, "transcribe_words", side_effect=fake_whisper
+            ):
+                words = hl.transcribe_service(video, ranges=[(2500.0, 3700.0)])
+                self.assertEqual(heard, [2400.0, 3000.0, 3600.0])  # chunks 4, 5 and 6 only
+                self.assertTrue(all(2500.0 <= w.start < 3700.0 for w in words))
+                heard.clear()
+                hl.transcribe_service(video, ranges=[(3000.0, 3500.0)])
+                self.assertEqual(heard, [])  # already cached
+
+    def test_trimmed_ranges_replace_sermon_detection(self) -> None:
+        words = sorted(_song(0, 1200) + _speech(1200, 3600) + _speech(4000, 4300), key=lambda w: w.start)
+        payload = {
+            "sermon_title": "t",
+            "highlights": [{"start_sentence": 2, "end_sentence": 6, "title": "one", "reason": "r"}],
+            "verse": {"reference": "Psalm 23:1", "text": "...", "reason": "r"},
+        }
+        fake = _FakeClaude(payload)
+        with mock.patch.object(hl, "transcribe_service", return_value=words) as transcribe, mock.patch.object(
+            hl, "find_sermon_window"
+        ) as detect:
+            plan = hl.find_highlights(Path("service.mp4"), ranges=[(4000.0, 4300.0), (2000.0, 2300.0)], claude=fake)
+        detect.assert_not_called()
+        self.assertEqual(transcribe.call_args.kwargs["ranges"], [(4000.0, 4300.0), (2000.0, 2300.0)])
+        sent = fake.calls[0]["messages"][0]["content"]
+        self.assertIn("S1 [0:33:20", sent)  # numbering starts in the earliest trimmed part
+        self.assertNotIn("[0:20:", sent)  # nothing outside the trims
+        self.assertEqual((plan.sermon_start, plan.sermon_end), (2000.0, 4300.0))
+        self.assertTrue(2000.0 <= plan.highlights[0].start < 2300.0)
+
 if __name__ == "__main__":
     unittest.main()

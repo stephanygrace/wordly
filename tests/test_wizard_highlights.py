@@ -84,6 +84,29 @@ class TestFindHighlightsInWizard(unittest.TestCase):
             self.assertIn("Sermon found", window._highlights_summary.text())
             window.close()
 
+    def test_trimmed_clips_become_the_scan_range(self) -> None:
+        import ui.wizard_window as ww
+        from models.project import ClipSegment
+
+        plan = HighlightPlan(highlights=[Highlight(3010.0, 3045.0, "Pick", "why")])
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "service.mp4"
+            video.write_bytes(b"x")
+            window = ww.WizardWindow()
+            window._project.sermon_path = video
+            window._project.segments = [ClipSegment("00:40:00", "01:50:00", "Sermon")]
+            with mock.patch.object(ww, "api_key", return_value="sk-test"), mock.patch.object(
+                ww, "find_highlights", return_value=plan
+            ) as finder, mock.patch.object(
+                ww.QMessageBox, "question", return_value=ww.QMessageBox.StandardButton.Yes
+            ) as asked:
+                window._find_highlights()
+                self._wait(window)
+            self.assertIn("only inside your trimmed clips", asked.call_args.args[2])
+            self.assertEqual(finder.call_args.kwargs["ranges"], [(2400.0, 6600.0)])
+            self.assertEqual([s.label for s in window._project.segments], ["Pick"])
+            window.close()
+
     def test_asks_for_key_once_and_saves_it(self) -> None:
         import ui.wizard_window as ww
 

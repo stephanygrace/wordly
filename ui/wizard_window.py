@@ -658,9 +658,9 @@ class WizardWindow(QMainWindow):
 
         claude_card = Card(
             "Let Claude pick",
-            "Transcribes the service, finds the sermon, and picks 2–3 highlights (2 minutes max) "
-            "plus the Bible verse. Find sermon is free: it skips the opening songs and adds the "
-            "sermon as one clip you can adjust.",
+            "Claude picks 2–3 highlights (2 minutes max) plus the Bible verse. To narrow the search, "
+            "trim first: Find sermon cuts out the songs for free, or add a clip around the part to "
+            "scan, and Claude looks only there. With no clips, Claude scans the whole video.",
         )
         set_prop(claude_card, "accent", "true")
         self._find_sermon_btn = button(
@@ -1877,11 +1877,22 @@ class WizardWindow(QMainWindow):
         if not sermon or not sermon.is_file():
             QMessageBox.warning(self, "Wordly", "Load the service video first.")
             return
-        if self._project.segments:
+        # Trimmed clips mark where Claude should look; without any it scans the whole video.
+        ranges: list[tuple[float, float]] = []
+        for seg in self._project.segments:
+            try:
+                ranges.append((_seconds(seg.start_text), _seconds(seg.end_text)))
+            except ValueError:
+                continue
+        if ranges:
+            total = sum(b - a for a, b in ranges)
+            parts = "this part" if len(ranges) == 1 else f"these {len(ranges)} parts"
             answer = QMessageBox.question(
                 self,
                 "Wordly",
-                "Replace your current clips with Claude's highlights?",
+                f"Claude will look for highlights only inside your trimmed clips "
+                f"({_short_clock(total)} in total) and replace {parts} with its picks.\n\n"
+                "To scan the whole video instead, remove the clips first.",
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
@@ -1890,7 +1901,12 @@ class WizardWindow(QMainWindow):
         self._preview.stop()
 
         def job(*, progress_cb, should_cancel):
-            return find_highlights(sermon, progress_cb=progress_cb, should_cancel=should_cancel)
+            return find_highlights(
+                sermon,
+                ranges=ranges or None,
+                progress_cb=progress_cb,
+                should_cancel=should_cancel,
+            )
 
         def on_fail(message: str) -> None:
             if message and message != "Cancelled":
@@ -1900,7 +1916,11 @@ class WizardWindow(QMainWindow):
             job,
             on_ok=self._apply_highlights,
             on_fail=on_fail,
-            message="Transcribing the service — a few minutes the first time…",
+            message=(
+                "Transcribing your trimmed part…"
+                if ranges
+                else "Transcribing the service — a few minutes the first time…"
+            ),
         )
 
     def _apply_highlights(self, plan: HighlightPlan) -> None:
