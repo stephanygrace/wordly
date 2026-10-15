@@ -25,6 +25,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QStyleFactory
 
+from ui import theme
 from ui.wizard_window import WizardWindow
 from utils.paths import ensure_directories
 
@@ -38,6 +39,7 @@ def main() -> int:
     fusion = QStyleFactory.create("Fusion")
     if fusion is not None:
         app.setStyle(fusion)
+    app.setPalette(theme.palette())
     app.setApplicationName("Wordly")
     app.setOrganizationName("Wordly")
     win = WizardWindow()

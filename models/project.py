@@ -75,6 +75,8 @@ class ProjectState:
     caption_style: Optional[str] = None
     # Sermon-reel layout: blurred background, video centred, verse block above it.
     reel_layout: bool = True
+    # Photo shown for the last seconds of the reel (with the music), e.g. a service poster.
+    end_photo: Optional[Path] = None
 
     def captions_current(self) -> bool:
         return bool(self.clip_captions) and self.captions_source == list(self.clip_paths)

@@ -23,13 +23,14 @@ from PySide6.QtWidgets import (
 from services.ffmpeg_frame import extract_preview_frame
 from utils.console_log import log_info, log_warn
 from utils.preview_target import PreviewDimensions, preview_target_dimensions
-from utils.timecode import format_timecode
 
 
 def _format_ms_as_timecode(ms: int) -> str:
-    if ms < 0:
-        ms = 0
-    return format_timecode(ms / 1000.0)
+    """HH:MM:SS for the player clock (whole seconds, like a video player)."""
+    seconds = max(0, int(ms) // 1000)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 def _running_on_wsl() -> bool:
@@ -85,17 +86,17 @@ class PreviewPlayer(QWidget):
 
         self._stack_host = _AspectRatioFrame()
         self._stack_host.setObjectName("PreviewStack")
-        self._stack_host.setStyleSheet("QWidget#PreviewStack { background: #16181c; }")
+        self._stack_host.setStyleSheet("QWidget#PreviewStack { background: #000000; border-radius: 8px; }")
         self._stack = QStackedLayout(self._stack_host)
         self._stack.setContentsMargins(0, 0, 0, 0)
         self._video = QVideoWidget()
         self._video.setMinimumHeight(160)
-        self._video.setStyleSheet("background: #16181c;")
+        self._video.setStyleSheet("background: #000000;")
         self._video.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._frame = QLabel("No video loaded")
         self._frame.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._frame.setMinimumHeight(160)
-        self._frame.setStyleSheet("background: #16181c; color: #aaa;")
+        self._frame.setStyleSheet("background: #000000; color: #646d79; border-radius: 8px;")
         self._stack.addWidget(self._video)
         self._stack.addWidget(self._frame)
 
@@ -122,39 +123,41 @@ class PreviewPlayer(QWidget):
         self._slider.sliderReleased.connect(self._on_slider_released)
 
         self._time_label = QLabel("00:00:00 / --:--:--")
+        self._time_label.setObjectName("Muted")
         self._status = QLabel("No video loaded")
+        self._status.setObjectName("Faint")
         self._status.setWordWrap(True)
 
-        self._play_toggle = QPushButton("Play")
-        self._play_toggle.setObjectName("PreviewControlButton")
-        self._play_toggle.setMinimumWidth(72)
+        self._play_toggle = QPushButton("▶")
+        self._play_toggle.setObjectName("Primary")
+        self._play_toggle.setFixedWidth(44)
+        self._play_toggle.setToolTip("Play / pause (Space)")
         self._play_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self._play_toggle.clicked.connect(self.toggle_play_pause)
 
         controls = QHBoxLayout()
+        controls.setSpacing(10)
         controls.addWidget(self._play_toggle)
-        controls.addStretch()
-
-        self._hint = QLabel("Smooth playback via Qt Multimedia. Scrub the slider to seek within the clip.")
-        self._hint.setObjectName("MutedHelpLabel")
-        self._hint.setWordWrap(True)
+        controls.addWidget(self._slider, 1)
+        controls.addWidget(self._time_label)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
-        layout.setContentsMargins(0, 0, 0, 2)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._stack_host)
-        layout.addSpacing(4)
         layout.addLayout(controls)
-        layout.addWidget(self._time_label)
-        layout.addWidget(self._slider)
         layout.addWidget(self._status)
-        layout.addSpacing(4)
-        layout.addWidget(self._hint)
 
         self._frame_ready.connect(self._apply_ffmpeg_frame)
 
     def has_media(self) -> bool:
         return self._path is not None
+
+    def position_seconds(self) -> float:
+        return self._position_ms / 1000.0
+
+    def seek_seconds(self, seconds: float) -> None:
+        self._seek_to(int(seconds * 1000))
 
     def duration_seconds(self) -> float:
         if self._duration_ms > 0:
@@ -331,7 +334,7 @@ class PreviewPlayer(QWidget):
     @Slot(QMediaPlayer.PlaybackState)
     def _on_playback_state(self, state: QMediaPlayer.PlaybackState) -> None:
         self._play_toggle.setText(
-            "Pause" if state == QMediaPlayer.PlaybackState.PlayingState else "Play"
+            "❚❚" if state == QMediaPlayer.PlaybackState.PlayingState else "▶"
         )
 
     @Slot(QMediaPlayer.Error, str)
@@ -349,7 +352,6 @@ class PreviewPlayer(QWidget):
         self._frame.setPixmap(QPixmap())
         self._frame.setText("Loading preview…")
         self._player.stop()
-        self._hint.setText("Frame preview via FFmpeg. Scrub the slider to seek.")
         self._status.setText(status)
         log_warn("preview", status)
 

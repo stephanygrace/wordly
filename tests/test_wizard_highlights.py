@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from services.claude_client import MissingApiKey
-from services.highlights import Highlight, HighlightPlan
+from services.highlights import Highlight, HighlightPlan, LuxUsage
 
 
 class TestFindHighlightsInWizard(unittest.TestCase):
@@ -30,7 +30,7 @@ class TestFindHighlightsInWizard(unittest.TestCase):
 
         plan = HighlightPlan(
             highlights=[
-                Highlight(3010.25, 3048.5, "Ang plano ng Diyos", "core message"),
+                Highlight(3010.0, 3048.0, "Ang plano ng Diyos", "core message"),
                 Highlight(4321.0, 4368.0, "Joseph forgives", "story"),
             ],
             verse_reference="Genesis 50:20",
@@ -39,6 +39,7 @@ class TestFindHighlightsInWizard(unittest.TestCase):
             sermon_title="Joseph",
             sermon_start=2400,
             sermon_end=6600,
+            usage=LuxUsage("claude-opus-5-5", input_tokens=34_701, output_tokens=1_463),
         )
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "service.mp4"
@@ -54,12 +55,60 @@ class TestFindHighlightsInWizard(unittest.TestCase):
             segments = [(s.start_text, s.end_text, s.label) for s in window._project.segments]
             self.assertEqual(
                 segments,
-                [("00:50:10.25", "00:50:48.50", "Ang plano ng Diyos"), ("01:12:01.00", "01:12:48.00", "Joseph forgives")],
+                [("00:50:10", "00:50:48", "Ang plano ng Diyos"), ("01:12:01", "01:12:48", "Joseph forgives")],
             )
             self.assertEqual(window._segment_list.count(), 2)
-            self.assertEqual(window._verse_edit.toPlainText().splitlines()[0], "Genesis 50:20")
+            self.assertEqual(window._verse_ref_edit.text(), "Genesis 50:20")
+            self.assertIn("Lux used 34,701 input + 1,463 output tokens · $0.168", window._highlights_summary.text())
+            self.assertEqual(finder.call_args.kwargs["ledger"], ww.LUX_LEDGER)
+            self.assertTrue(window._lux_spend.text().startswith("Lux spending so far: $"))
+            self.assertTrue(window._verse_edit.toPlainText().startswith("You intended"))
             self.assertEqual(window._project.selected_verse.reference, "Genesis 50:20")
             self.assertIn("Total 85s", window._highlights_summary.text())
+            window.close()
+
+    def test_find_sermon_adds_one_adjustable_clip(self) -> None:
+        import ui.wizard_window as ww
+
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "service.mp4"
+            video.write_bytes(b"x")
+            window = ww.WizardWindow()
+            window._project.sermon_path = video
+            with mock.patch.object(ww, "find_sermon", return_value=(2253.0, 6735.0)) as finder, mock.patch.object(
+                ww, "api_key", side_effect=AssertionError("Find sermon must not need Lux")
+            ):
+                window._find_sermon()
+                self._wait(window)
+            finder.assert_called_once()
+            segments = [(s.start_text, s.end_text, s.label) for s in window._project.segments]
+            self.assertEqual(segments, [("00:37:33", "01:52:15", "Sermon")])
+            self.assertEqual(window._segment_list.currentRow(), 0)
+            self.assertEqual(window._seg_start.text(), "00:37:33")
+            self.assertIn("Sermon found", window._highlights_summary.text())
+            window.close()
+
+    def test_trimmed_clips_become_the_scan_range(self) -> None:
+        import ui.wizard_window as ww
+        from models.project import ClipSegment
+
+        plan = HighlightPlan(highlights=[Highlight(3010.0, 3045.0, "Pick", "why")])
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "service.mp4"
+            video.write_bytes(b"x")
+            window = ww.WizardWindow()
+            window._project.sermon_path = video
+            window._project.segments = [ClipSegment("00:40:00", "01:50:00", "Sermon")]
+            with mock.patch.object(ww, "api_key", return_value="sk-test"), mock.patch.object(
+                ww, "find_highlights", return_value=plan
+            ) as finder, mock.patch.object(
+                ww.QMessageBox, "question", return_value=ww.QMessageBox.StandardButton.Yes
+            ) as asked:
+                window._find_highlights()
+                self._wait(window)
+            self.assertIn("only inside your trimmed clips", asked.call_args.args[2])
+            self.assertEqual(finder.call_args.kwargs["ranges"], [(2400.0, 6600.0)])
+            self.assertEqual([s.label for s in window._project.segments], ["Pick"])
             window.close()
 
     def test_asks_for_key_once_and_saves_it(self) -> None:
