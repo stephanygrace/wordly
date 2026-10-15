@@ -274,6 +274,47 @@ def stabilize_if_shaky(src: Path, dest: Path) -> Path:
     return dest
 
 
+def background_join_filter(durations_s: list[float], handle_s: float) -> str:
+    """ffmpeg filtergraph: the per-clip backgrounds as one track, cross-fading at each cut.
+
+    Each input carries *handle_s* of hidden media at both ends. The fades are
+    2 x handle_s long and centred on the cuts, matching the main clips' dissolves,
+    so the output is exactly as long as the timeline.
+    """
+    n = len(durations_s)
+    parts = []
+    for i, dur in enumerate(durations_s):
+        start = handle_s if i == 0 else 0.0
+        end = dur - handle_s if i == n - 1 else dur
+        # xfade needs one constant frame rate on both sides: the timeline's.
+        parts.append(f"[{i}:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS,fps={DEFAULT_FPS:g}[v{i}]")
+    last, cut = "v0", 0.0
+    for i in range(1, n):
+        cut += durations_s[i - 1] - 2 * handle_s
+        out = f"x{i}"
+        parts.append(
+            f"[{last}][v{i}]xfade=transition=fade:duration={2 * handle_s:.3f}:offset={cut - handle_s:.3f}[{out}]"
+        )
+        last = out
+    parts.append(f"[{last}]format=yuv420p[out]")
+    return ";".join(parts)
+
+
+def join_backgrounds(backgrounds: list[Path], dest: Path, *, durations_s: list[float], handle_s: float) -> Path:
+    """One continuous background video for the timeline, fading between clips."""
+    inputs = [arg for bg in backgrounds for arg in ("-i", str(bg))]
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error", *inputs,
+            "-filter_complex", background_join_filter(durations_s, handle_s), "-map", "[out]", "-an",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", str(dest),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return dest
+
+
 def render_main(
     src: Path,
     dest: Path,

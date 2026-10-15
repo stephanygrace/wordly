@@ -29,9 +29,11 @@ from services.resolve_canvas import (
 from services.resolve_template import template_available, template_path
 from services.transcribe import Caption, transcribe_clips, word_timings
 from services import speaker_track
+from services.multi_clip import CLIP_HANDLE_S
 from services.reel_layout import (
     DEFAULT_LAYOUT,
     VerseLine,
+    join_backgrounds,
     render_background,
     render_main,
     stabilize_if_shaky,
@@ -125,18 +127,21 @@ def _write_captions_srt(
     clip_captions: list[list[Caption]],
     durations_s: list[float],
     style: CaptionStyle | None = None,
+    handle_s: float = 0.0,
 ) -> int:
     """Write all captions on timeline time (each clip shifted by its offset). Returns count."""
     entries: list[str] = []
     offset_s = 0.0
     for captions, dur_s in zip(clip_captions, durations_s):
-        for cap in captions:
+        first, last = visible_span(dur_s, handle_s)
+        for cap in _visible_captions(captions, first, last):
+            cap = Caption(cap.start - first, cap.end - first, cap.text)
             n = len(entries) + 1
             start = _srt_timestamp(offset_s + cap.start)
             end = _srt_timestamp(offset_s + cap.end)
             text = style.display_text(cap.text) if style else cap.text
             entries.append(f"{n}\n{start} --> {end}\n{text}\n")
-        offset_s += dur_s
+        offset_s += last - first
     path.write_text("\n".join(entries), encoding="utf-8")
     return len(entries)
 
@@ -276,6 +281,7 @@ def _add_verse_titles(
     *,
     effect_id: str,
     duration_s: float,
+    offset: str = "0s",
 ) -> None:
     """The whole verse block as one editable Basic Title for the whole reel.
 
@@ -291,7 +297,7 @@ def _add_verse_titles(
         "title",
         ref=effect_id,
         lane=str(VERSE_LANE),
-        offset="0s",
+        offset=offset,
         name="Bible verse",
         duration=_seconds_to_fcpxml(duration_s),
         start="0s",
@@ -446,9 +452,17 @@ def _build_fcpxml(
     timeline_duration_s: float,
     clip_captions: list[list[Caption]] | None = None,
     caption_style: CaptionStyle | None = None,
-    backgrounds: list[Path] | None = None,
+    background: Path | None = None,
     verse: list[VerseLine] | None = None,
+    handle_s: float = 0.0,
 ) -> Element:
+    """The Resolve timeline.
+
+    With *handle_s*, each clip file has that much hidden media at both ends: the
+    timeline shows the middle, and a cross-dissolve of 2 x handle_s (video and
+    audio) is centred on every cut between clips. *background* is one video
+    for the whole timeline under the clips.
+    """
     root = Element("fcpxml", version=FCPXML_VERSION)
     resources = SubElement(root, "resources")
     format_id = "r1"
@@ -493,18 +507,18 @@ def _build_fcpxml(
         SubElement(asset, "media-rep", kind="original-media", src=src)
         asset_ids.append(asset_id)
 
-    background_ids: list[str] = []
-    for bg in backgrounds or []:
-        bg_id = f"r{next_id}"
+    background_id: str | None = None
+    if background is not None:
+        background_id = f"r{next_id}"
         next_id += 1
-        src = _file_url(bg)
+        src = _file_url(background)
         asset = SubElement(
             resources,
             "asset",
-            id=bg_id,
-            name=bg.stem,
+            id=background_id,
+            name=background.stem,
             start="0s",
-            duration=_seconds_to_fcpxml(_safe_duration(bg)),
+            duration=_seconds_to_fcpxml(_safe_duration(background, fallback_s=timeline_duration_s)),
             hasVideo="1",
             hasAudio="0",
             format=format_id,
@@ -512,7 +526,6 @@ def _build_fcpxml(
         )
         asset.set("src", src)
         SubElement(asset, "media-rep", kind="original-media", src=src)
-        background_ids.append(bg_id)
 
     music_id: str | None = None
     if music is not None:
@@ -545,6 +558,17 @@ def _build_fcpxml(
     caption_counter = [0]
     style = caption_style or get_caption_style(None)
 
+    # Per clip: hidden frames at each end (none for a clip too short to spare them).
+    handle_f = _frame(handle_s)
+    durations_f = [_frame(d) for d in durations_s]
+    handles_f = [handle_f if d > 4 * handle_f else 0 for d in durations_f]
+    dissolve_ids: tuple[str, str] | None = None
+    if handle_f and len(clip_paths) > 1:
+        dissolve_ids = (f"r{next_id}", f"r{next_id + 1}")
+        next_id += 2
+        SubElement(resources, "effect", id=dissolve_ids[0], name="Cross Dissolve", uid=CROSS_DISSOLVE_UID)
+        SubElement(resources, "effect", id=dissolve_ids[1], name="Audio Crossfade", uid=AUDIO_CROSSFADE_UID)
+
     library = SubElement(root, "library")
     event = SubElement(library, "event", name="Wordly")
     proj = SubElement(event, "project", name=project_name)
@@ -560,42 +584,53 @@ def _build_fcpxml(
     )
     spine = SubElement(sequence, "spine")
 
-    offset_s = 0.0
-    for idx, (asset_id, dur_s) in enumerate(zip(asset_ids, durations_s)):
+    offset_f = 0
+    for idx, (asset_id, dur_f, h_f) in enumerate(zip(asset_ids, durations_f, handles_f)):
+        visible_f = dur_f - 2 * h_f
+        if idx > 0 and dissolve_ids is not None and h_f and handles_f[idx - 1]:
+            # Centred on the cut; uses the hidden frames on both sides.
+            _add_dissolve(spine, offset_f - h_f, 2 * h_f, dissolve_ids)
         clip_el = SubElement(
             spine,
             "asset-clip",
             ref=asset_id,
-            offset=_seconds_to_fcpxml(offset_s),
+            offset=_frames_to_fcpxml(offset_f),
             name=f"Clip{idx + 1:03d}",
-            duration=_seconds_to_fcpxml(dur_s),
-            start="0s",
+            duration=_frames_to_fcpxml(visible_f),
+            start=_frames_to_fcpxml(h_f),
             tcFormat="NDF",
         )
-        if idx < len(background_ids):
-            # Under the sermon video; Resolve fits the 16:9 clip full width above it.
+        # Connected items are placed in the clip's own (media) time; the first
+        # visible frame of the clip is at its start.
+        local_start = _frames_to_fcpxml(h_f)
+        if idx == 0 and background_id is not None:
+            # Under the sermon video for the whole reel; Resolve fits the 16:9 clip full width above it.
             SubElement(
                 clip_el,
                 "asset-clip",
-                ref=background_ids[idx],
+                ref=background_id,
                 lane="-1",
-                offset="0s",
-                name=f"Clip{idx + 1:03d} background",
-                duration=_seconds_to_fcpxml(dur_s),
+                offset=local_start,
+                name="Background",
+                duration=_seconds_to_fcpxml(timeline_duration_s),
                 start="0s",
                 tcFormat="NDF",
             )
         if idx == 0 and verse and caption_effect_id is not None:
             _add_verse_titles(
-                clip_el, verse, effect_id=caption_effect_id, duration_s=timeline_duration_s
+                clip_el,
+                verse,
+                effect_id=caption_effect_id,
+                duration_s=timeline_duration_s,
+                offset=local_start,
             )
         if idx == 0 and music_id is not None:
             music_el = SubElement(
                 clip_el,
                 "asset-clip",
                 ref=music_id,
-                lane="-2" if background_ids else "-1",
-                offset="0s",
+                lane="-2" if background_id else "-1",
+                offset=local_start,
                 name="Instrumental",
                 duration=_seconds_to_fcpxml(timeline_duration_s),
                 start="0s",
@@ -606,14 +641,49 @@ def _build_fcpxml(
         if caption_effect_id is not None and clip_captions and idx < len(clip_captions):
             _add_caption_titles(
                 clip_el,
-                clip_captions[idx],
+                _visible_captions(clip_captions[idx], h_f / DEFAULT_FPS, (dur_f - h_f) / DEFAULT_FPS),
                 effect_id=caption_effect_id,
                 style=style,
                 counter=caption_counter,
             )
-        offset_s += dur_s
+        offset_f += visible_f
 
     return root
+
+
+# Final Cut Pro's built-in transitions; Resolve imports them as its Cross Dissolve.
+CROSS_DISSOLVE_UID = "FxPlug:4731E73A-8DAC-4113-9A30-AE85B1761265"
+AUDIO_CROSSFADE_UID = "FFAudioTransition"
+
+
+def _add_dissolve(spine: Element, offset_f: int, duration_f: int, effect_ids: tuple[str, str]) -> None:
+    transition = SubElement(
+        spine,
+        "transition",
+        name="Cross Dissolve",
+        offset=_frames_to_fcpxml(offset_f),
+        duration=_frames_to_fcpxml(duration_f),
+    )
+    SubElement(transition, "filter-video", ref=effect_ids[0], name="Cross Dissolve")
+    SubElement(transition, "filter-audio", ref=effect_ids[1], name="Audio Crossfade")
+
+
+def visible_span(duration_s: float, handle_s: float) -> tuple[float, float]:
+    """The part of a clip file that plays on the timeline."""
+    h = handle_s if _frame(duration_s) > 4 * _frame(handle_s) else 0.0
+    return h, duration_s - h
+
+
+def _visible_captions(captions: list[Caption], start_s: float, end_s: float) -> list[Caption]:
+    """Captions inside the clip's visible part; ones crossing an edge are cut to it."""
+    out = []
+    for cap in captions:
+        a, b = max(cap.start, start_s), min(cap.end, end_s)
+        if b - a < 0.05:
+            continue
+        # Whisper's word times no longer fit a shortened caption; spread its words instead.
+        out.append(cap if (a, b) == (cap.start, cap.end) else Caption(a, b, cap.text))
+    return out
 
 
 def _write_fcpxml(path: Path, root: Element) -> None:
@@ -666,7 +736,8 @@ def generate_resolve_project(
     )
 
     durations = [_safe_duration(p) for p in clip_paths]
-    timeline_duration_s = sum(durations) if durations else 1.0
+    # Each clip file carries hidden frames at both ends for the fades between clips.
+    timeline_duration_s = sum(b - a for a, b in (visible_span(d, CLIP_HANDLE_S) for d in durations)) or 1.0
 
     clip_captions: list[list[Caption]] | None = None
     captions_srt: Path | None = None
@@ -685,8 +756,11 @@ def generate_resolve_project(
                 ratio_range=(0.5, 0.7),
             )
         captions_srt = bundle_dir / "captions.srt"
-        caption_count = _write_captions_srt(captions_srt, clip_captions, durations, caption_style)
+        caption_count = _write_captions_srt(
+            captions_srt, clip_captions, durations, caption_style, handle_s=CLIP_HANDLE_S
+        )
 
+    background: Path | None = None
     backgrounds: list[Path] = []
     verse: list[VerseLine] = []
     timeline_clips = clip_paths
@@ -697,6 +771,16 @@ def generate_resolve_project(
         if len(mains) == len(clip_paths):
             # Zoomed head-to-waist versions (same length and audio) replace the originals.
             timeline_clips = mains
+    if project.reel_layout and backgrounds and len(backgrounds) == len(timeline_clips):
+        _progress(progress_cb, 0.88, "Blending the background between clips…")
+        # One track with the fades baked in, so it dissolves along with the clips.
+        handles = [visible_span(d, CLIP_HANDLE_S)[0] for d in durations]
+        background = join_backgrounds(
+            backgrounds,
+            bundle_dir / "media" / "Background.mp4",
+            durations_s=durations,
+            handle_s=min(handles) if handles else 0.0,
+        )
 
     _progress(progress_cb, 0.89, "Writing verse subtitle…")
     verse_srt = bundle_dir / "verse.srt"
@@ -715,8 +799,9 @@ def generate_resolve_project(
         timeline_duration_s=timeline_duration_s,
         clip_captions=clip_captions,
         caption_style=caption_style,
-        backgrounds=backgrounds,
+        background=background,
         verse=verse,
+        handle_s=CLIP_HANDLE_S,
     )
     timeline_path = bundle_dir / f"{stem}.fcpxml"
     _write_fcpxml(timeline_path, root)

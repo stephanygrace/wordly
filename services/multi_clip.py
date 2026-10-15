@@ -17,6 +17,13 @@ from utils.subprocess_win import background_creationflags
 ProgressCallback = Callable[[float, str], None]
 ShouldCancel = Callable[[], bool]
 
+# Every clip keeps 1 s of breathing room before and after the chosen range, plus
+# half a second more on each side that stays hidden on the timeline: the media
+# Resolve's 1 s cross-fade between clips draws on.
+CLIP_ALLOWANCE_S = 1.0
+CLIP_HANDLE_S = 0.5
+CLIP_PAD_S = CLIP_ALLOWANCE_S + CLIP_HANDLE_S
+
 # -loglevel info: lets ffmpeg print "time=HH:MM:SS" progress lines to stderr
 # which are unbuffered unlike stdout pipes.
 _FFMPEG_GLOBAL = ("-nostdin", "-hide_banner", "-loglevel", "info")
@@ -234,8 +241,9 @@ def export_segment_clip(
     should_cancel: Optional[ShouldCancel] = None,
 ) -> Path:
     spec = parse_trim_times(segment.start_text, segment.end_text)
-    start_s, end_s = spec.start_seconds, spec.end_seconds
-    duration_s = spec.duration_seconds
+    start_s = max(0.0, spec.start_seconds - CLIP_PAD_S)
+    end_s = spec.end_seconds + CLIP_PAD_S  # ffmpeg stops at the end of the video
+    duration_s = end_s - start_s
     output_path.parent.mkdir(parents=True, exist_ok=True)
     prefer_reencode = _prefer_reencode_for_editing(sermon_path)
 

@@ -274,8 +274,13 @@ class TestGenerateResolveProject(unittest.TestCase):
             root_el = ET.parse(timeline).getroot()
             clip_el = root_el.find(".//spine/asset-clip")
             connected = {el.get("name"): el for el in clip_el}
-            bg = connected["Clip001 background"]
+            bg = connected["Background"]
             self.assertEqual((bg.tag, bg.get("lane")), ("asset-clip", "-1"))
+            # The clip hides half a second at each end (for fades); connected items start with it.
+            self.assertEqual(clip_el.get("start"), _seconds_to_fcpxml(0.5))
+            self.assertEqual(clip_el.get("duration"), _seconds_to_fcpxml(3.0))
+            self.assertEqual(bg.get("offset"), clip_el.get("start"))
+            self.assertEqual(connected["Instrumental"].get("offset"), clip_el.get("start"))
             # The verse is one editable title with line breaks, on a single track.
             verse_titles = [t for t in root_el.iter("title") if t.get("name") == "Bible verse"]
             self.assertEqual(len(verse_titles), 1)
@@ -294,7 +299,7 @@ class TestGenerateResolveProject(unittest.TestCase):
             # Background song sits 15 dB down, as an editable clip volume.
             self.assertEqual(connected["Instrumental"].find("adjust-volume").get("amount"), "-15dB")
             assets = {a.get("id"): a for a in root_el.findall("./resources/asset")}
-            self.assertTrue(assets[bg.get("ref")].get("src").endswith("media/Clip001_bg.mp4"))
+            self.assertTrue(assets[bg.get("ref")].get("src").endswith("media/Background.mp4"))
             # The spine uses the zoomed head-to-waist render, which keeps the audio.
             main = assets[clip_el.get("ref")]
             self.assertTrue(main.get("src").endswith("media/Clip001_main.mp4"))
