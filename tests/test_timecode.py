@@ -7,6 +7,7 @@ from utils.timecode import (
     format_timecode_digits,
     normalize_four_digit_timecode,
     parse_timecode,
+    parse_timestamp_list,
     validate_range,
     validate_segment_times,
 )
@@ -71,3 +72,29 @@ class TestTimecode(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTimestampList(unittest.TestCase):
+    def test_bare_digits_are_hours_and_minutes(self) -> None:
+        windows = parse_timestamp_list("101\n112\n124\n149\n151")
+        self.assertEqual(
+            windows,
+            [(3660.0, 3720.0), (4320.0, 4380.0), (5040.0, 5100.0), (6540.0, 6600.0), (6660.0, 6720.0)],
+        )
+
+    def test_other_formats(self) -> None:
+        self.assertEqual(parse_timestamp_list("14930, 1:05 1:05:30"), [(3900.0, 3990.0), (6570.0, 6630.0)])
+
+    def test_overlapping_windows_merge(self) -> None:
+        self.assertEqual(parse_timestamp_list("150 101 150"), [(3660.0, 3720.0), (6600.0, 6660.0)])
+
+    def test_clamped_to_video(self) -> None:
+        self.assertEqual(parse_timestamp_list("101", media_duration_s=3690.0), [(3660.0, 3690.0)])
+        with self.assertRaises(ValueError):
+            parse_timestamp_list("201", media_duration_s=3690.0)
+
+    def test_rejects_bad_input(self) -> None:
+        for text in ("", "175", "abc"):
+            with self.assertRaises(ValueError):
+                parse_timestamp_list(text)
+
