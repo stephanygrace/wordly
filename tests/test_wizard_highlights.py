@@ -57,7 +57,8 @@ class TestFindHighlightsInWizard(unittest.TestCase):
                 [("00:50:10.25", "00:50:48.50", "Ang plano ng Diyos"), ("01:12:01.00", "01:12:48.00", "Joseph forgives")],
             )
             self.assertEqual(window._segment_list.count(), 2)
-            self.assertEqual(window._verse_edit.toPlainText().splitlines()[0], "Genesis 50:20")
+            self.assertEqual(window._verse_ref_edit.text(), "Genesis 50:20")
+            self.assertTrue(window._verse_edit.toPlainText().startswith("You intended"))
             self.assertEqual(window._project.selected_verse.reference, "Genesis 50:20")
             self.assertIn("Total 85s", window._highlights_summary.text())
             window.close()
