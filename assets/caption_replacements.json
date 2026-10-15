@@ -1,0 +1,21 @@
+{
+  "_comment": "Spoken phrase (case/punctuation-insensitive) -> caption text. Keys starting with _ are ignored.",
+  "first samuel": "1 Samuel",
+  "second samuel": "2 Samuel",
+  "first kings": "1 Kings",
+  "second kings": "2 Kings",
+  "first chronicles": "1 Chronicles",
+  "second chronicles": "2 Chronicles",
+  "first corinthians": "1 Corinthians",
+  "second corinthians": "2 Corinthians",
+  "first thessalonians": "1 Thessalonians",
+  "second thessalonians": "2 Thessalonians",
+  "first timothy": "1 Timothy",
+  "second timothy": "2 Timothy",
+  "first peter": "1 Peter",
+  "second peter": "2 Peter",
+  "second john": "2 John",
+  "third john": "3 John",
+  "holy spirit": "Holy Spirit",
+  "holy ghost": "Holy Ghost"
+}
