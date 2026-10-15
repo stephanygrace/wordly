@@ -106,5 +106,5 @@ if (Test-Path $venvPy) {
 }
 
 Write-Host ""
-Write-Host "Optional (install manually): Filmora 14.2.9"
+Write-Host "Optional (install manually): DaVinci Resolve Free"
 Write-Host "Restart Cursor / Git Bash so PATH changes apply everywhere."

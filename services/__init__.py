@@ -1,1 +1,1 @@
-"""Background services for download, trim, AI suggestions, and Filmora export."""
+"""Background services for download, trim, AI suggestions, and Resolve export."""

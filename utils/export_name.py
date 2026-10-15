@@ -11,5 +11,5 @@ def last_sunday(from_date: date | None = None) -> date:
 
 
 def default_export_project_name(from_date: date | None = None) -> str:
-    """Default Filmora export name: last Sunday as MM.DD.YY (e.g. 06.28.26)."""
+    """Default export project name: last Sunday as MM.DD.YY (e.g. 06.28.26)."""
     return last_sunday(from_date).strftime("%m.%d.%y")
