@@ -76,6 +76,7 @@ from utils.timecode import (
     format_timecode,
     normalize_four_digit_timecode,
     parse_timecode,
+    parse_timestamp_list,
     validate_segment_times,
 )
 
@@ -669,7 +670,8 @@ class WizardWindow(QMainWindow):
             "Let Lux pick",
             "Lux picks 2–3 highlights (2 minutes max) plus the Bible verse. To narrow the search, "
             "trim first: Find sermon cuts out the songs for free, or add a clip around the part to "
-            "scan, and Lux looks only there. With no clips, Lux scans the whole video.",
+            "scan, and Lux looks only there. Or paste a list of times and Lux scans 60 s from each. "
+            "With no clips, Lux scans the whole video.",
         )
         set_prop(lux_card, "accent", "true")
         self._find_sermon_btn = button(
@@ -677,9 +679,15 @@ class WizardWindow(QMainWindow):
             tooltip="Free, no Lux: skips the opening songs and adds the sermon as a clip you can adjust.",
             on_click=self._find_sermon,
         )
-        self._find_highlights_btn = button("✦  Let Lux pick highlights", "Primary", on_click=self._find_highlights)
+        self._find_highlights_btn = button("✦  Let Lux pick highlights", "Primary", on_click=lambda: self._find_highlights())
+        self._paste_times_btn = button(
+            "Paste times",
+            tooltip="Paste start times (e.g. 101, 149 = 1:01:00, 1:49:00); each becomes a 60 s clip Lux scans.",
+            on_click=self._paste_timestamps,
+        )
         lux_actions = QHBoxLayout()
         lux_actions.addWidget(self._find_sermon_btn)
+        lux_actions.addWidget(self._paste_times_btn)
         lux_actions.addWidget(self._find_highlights_btn, 1)
         lux_card.body.addLayout(lux_actions)
         self._highlights_summary = label("", "Notice", wrap=True)
@@ -1572,6 +1580,7 @@ class WizardWindow(QMainWindow):
             btn.setEnabled(not self._busy)
         self._find_highlights_btn.setEnabled(not self._busy and self._step_complete(S_SOURCE))
         self._find_sermon_btn.setEnabled(not self._busy and self._step_complete(S_SOURCE))
+        self._paste_times_btn.setEnabled(not self._busy and self._step_complete(S_SOURCE))
         self._save_clips_btn.setEnabled(not self._busy and self._step_complete(S_HIGHLIGHTS))
         self._transcribe_btn.setEnabled(
             self._captions_enabled() and not self._busy and bool(self._project.clip_paths)
@@ -1953,7 +1962,35 @@ class WizardWindow(QMainWindow):
             message="Listening for the sermon — a few minutes the first time…",
         )
 
-    def _find_highlights(self) -> None:
+    def _paste_timestamps(self) -> None:
+        """Turn pasted start times into 60 s clips, then let Lux scan just those."""
+        sermon = self._project.sermon_path
+        if not sermon or not sermon.is_file():
+            QMessageBox.warning(self, "Wordly", "Load the service video first.")
+            return
+        text, ok = QInputDialog.getMultiLineText(
+            self,
+            "Paste times",
+            "One start time per line. 101 means 1:01:00; 1:49:30 is exact.\n"
+            "Each becomes a 60-second clip, and Lux picks highlights from inside them.",
+        )
+        if not ok or not text.strip():
+            return
+        try:
+            windows = parse_timestamp_list(text, length_s=60.0, media_duration_s=self._project.sermon_duration_s or None)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Wordly", str(exc))
+            return
+        self._project.segments = [
+            ClipSegment(highlight_timecode(start), highlight_timecode(end)) for start, end in windows
+        ]
+        self._invalidate_clips()
+        self._refresh_segment_list()
+        self._on_segment_row_changed(-1)
+        self._update_nav()
+        self._find_highlights(confirm=False)
+
+    def _find_highlights(self, *, confirm: bool = True) -> None:
         sermon = self._project.sermon_path
         if not sermon or not sermon.is_file():
             QMessageBox.warning(self, "Wordly", "Load the service video first.")
@@ -1965,7 +2002,7 @@ class WizardWindow(QMainWindow):
                 ranges.append((_seconds(seg.start_text), _seconds(seg.end_text)))
             except ValueError:
                 continue
-        if ranges:
+        if ranges and confirm:
             total = sum(b - a for a, b in ranges)
             parts = "this part" if len(ranges) == 1 else f"these {len(ranges)} parts"
             answer = QMessageBox.question(
