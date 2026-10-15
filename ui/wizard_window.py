@@ -49,7 +49,7 @@ from services.resolve_export import END_PHOTO_S, generate_resolve_project
 from services.resolve_launcher import install_import_script, open_resolve_project, reveal_in_finder
 from services.resolve_template import template_available
 from services.claude_client import MissingApiKey, api_key, save_api_key
-from services.highlights import MAX_TOTAL_S, HighlightPlan, find_highlights, format_clock
+from services.highlights import MAX_TOTAL_S, HighlightPlan, find_highlights, find_sermon, format_clock
 from services.highlights import format_timecode as highlight_timecode
 from services.caption_style import DEFAULT_STYLE_NAME, CaptionStyle, load_caption_styles
 from services.transcribe import Caption, transcribe_clips, whisper_backend_label, whisper_model_name, word_timings
@@ -659,11 +659,20 @@ class WizardWindow(QMainWindow):
         claude_card = Card(
             "Let Claude pick",
             "Transcribes the service, finds the sermon, and picks 2–3 highlights (2 minutes max) "
-            "plus the Bible verse. You can change everything afterwards.",
+            "plus the Bible verse. Find sermon is free: it skips the opening songs and adds the "
+            "sermon as one clip you can adjust.",
         )
         set_prop(claude_card, "accent", "true")
+        self._find_sermon_btn = button(
+            "Find sermon",
+            tooltip="Free, no Claude: skips the opening songs and adds the sermon as a clip you can adjust.",
+            on_click=self._find_sermon,
+        )
         self._find_highlights_btn = button("✦  Find highlights with Claude", "Primary", on_click=self._find_highlights)
-        claude_card.body.addWidget(self._find_highlights_btn)
+        claude_actions = QHBoxLayout()
+        claude_actions.addWidget(self._find_sermon_btn)
+        claude_actions.addWidget(self._find_highlights_btn, 1)
+        claude_card.body.addLayout(claude_actions)
         self._highlights_summary = label("", "Notice", wrap=True)
         set_prop(self._highlights_summary, "tone", "claude")
         self._highlights_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -1481,6 +1490,7 @@ class WizardWindow(QMainWindow):
         ):
             btn.setEnabled(not self._busy)
         self._find_highlights_btn.setEnabled(not self._busy and self._step_complete(S_SOURCE))
+        self._find_sermon_btn.setEnabled(not self._busy and self._step_complete(S_SOURCE))
         self._save_clips_btn.setEnabled(not self._busy and self._step_complete(S_HIGHLIGHTS))
         self._transcribe_btn.setEnabled(
             self._captions_enabled() and not self._busy and bool(self._project.clip_paths)
@@ -1817,6 +1827,50 @@ class WizardWindow(QMainWindow):
             QMessageBox.warning(self, "Wordly", str(exc))
             return False
         return True
+
+    def _find_sermon(self) -> None:
+        sermon = self._project.sermon_path
+        if not sermon or not sermon.is_file():
+            QMessageBox.warning(self, "Wordly", "Load the service video first.")
+            return
+        if self._project.segments:
+            answer = QMessageBox.question(
+                self,
+                "Wordly",
+                "Find sermon replaces your clips with one clip around the sermon. Continue?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self._preview.stop()
+
+        def job(*, progress_cb, should_cancel):
+            return find_sermon(sermon, progress_cb=progress_cb, should_cancel=should_cancel)
+
+        def on_ok(bounds: tuple[float, float]) -> None:
+            start, end = bounds
+            self._project.segments = [ClipSegment(highlight_timecode(start), highlight_timecode(end), "Sermon")]
+            self._invalidate_clips()
+            self._refresh_segment_list()
+            self._select_segment(0)
+            self._highlights_summary.setText(
+                f"<b>Sermon found: {format_clock(start)}–{format_clock(end)}</b> ({_short_clock(end - start)}). "
+                "Check the start and end on the player — the end can run into the closing prayer — "
+                "then let Claude pick highlights from it."
+            )
+            self._highlights_summary.setVisible(True)
+            self._on_timestamp_fields_changed()
+            self._update_nav()
+
+        def on_fail(message: str) -> None:
+            if message and message != "Cancelled":
+                QMessageBox.warning(self, "Wordly", f"Couldn't find the sermon:\n{message}")
+
+        self._run_job(
+            job,
+            on_ok=on_ok,
+            on_fail=on_fail,
+            message="Listening for the sermon — a few minutes the first time…",
+        )
 
     def _find_highlights(self) -> None:
         sermon = self._project.sermon_path

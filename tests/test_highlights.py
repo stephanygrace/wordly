@@ -54,6 +54,35 @@ class TestSermonWindow(unittest.TestCase):
         self.assertAlmostEqual(end, 3300.0, delta=1)  # capped at the last word
 
 
+class TestLocateSermon(unittest.TestCase):
+    def _lyrics(self, start: float, end: float) -> list[Word]:
+        """A worship song: plenty of words, but the same few lines over and over."""
+        line = [" I", " want", " to", " know", " you", " more."]
+        return [Word(t, t + 0.3, line[k % len(line)]) for k, t in enumerate(range(int(start), int(end)))]
+
+    def test_cuts_out_songs_at_the_first_spoken_word(self) -> None:
+        words = self._lyrics(0, 1500) + _speech(1510, 4200) + self._lyrics(4210, 4800)
+        start, end = hl.locate_sermon(sorted(words, key=lambda w: w.start))
+        self.assertEqual(start, 1509.0)  # the whole second before the first spoken word
+        self.assertAlmostEqual(end, 4200, delta=1.0)
+
+    def test_organ_flood_and_a_garbled_minute_do_not_end_the_sermon(self) -> None:
+        organ = [Word(1800 + k * 0.1, 1800 + k * 0.1 + 0.05, " Organ") for k in range(600)]
+        words = _song(0, 1200) + _speech(1200, 1800) + organ + _speech(1860, 3600) + _song(3600, 4200)
+        start, end = hl.locate_sermon(sorted(words, key=lambda w: w.start))
+        self.assertEqual(start, 1199.0)
+        self.assertAlmostEqual(end, 3600, delta=1.0)
+
+    def test_no_sermon_in_a_concert(self) -> None:
+        self.assertIsNone(hl.locate_sermon(self._lyrics(0, 3600)))
+        self.assertIsNone(hl.locate_sermon(_song(0, 600) + _speech(600, 780) + _song(780, 3600)))
+
+    def test_find_sermon_raises_friendly_error(self) -> None:
+        with mock.patch.object(hl, "transcribe_service", return_value=_song(0, 3600)):
+            with self.assertRaisesRegex(RuntimeError, "Couldn't find a clear sermon"):
+                hl.find_sermon(Path("service.mp4"))
+
+
 class TestSentences(unittest.TestCase):
     def test_splits_on_punctuation_pause_and_length(self) -> None:
         words = [Word(0.0, 0.3, " Hello"), Word(0.4, 0.7, " church."), Word(0.8, 1.1, " Amen"),
@@ -203,7 +232,8 @@ class TestFindHighlights(unittest.TestCase):
         with mock.patch.object(hl, "transcribe_service", return_value=words):
             plan = hl.find_highlights(Path("service.mp4"), claude=_FakeClaude(payload),
                                       progress_cb=lambda r, _m: steps.append(r))
-        self.assertEqual((plan.sermon_start, plan.sermon_end), (1200.0, 3600.0))
+        self.assertAlmostEqual(plan.sermon_start, 1200.0, delta=1.0)
+        self.assertAlmostEqual(plan.sermon_end, 3600.0, delta=1.0)
         self.assertEqual([h.title for h in plan.highlights], ["one", "two"])
         self.assertEqual(plan.highlights[0].start, hl.whole_second_start(sermon[9].start, sermon[8].end + 0.02))
         self.assertEqual(steps, sorted(steps))

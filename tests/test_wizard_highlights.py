@@ -63,6 +63,27 @@ class TestFindHighlightsInWizard(unittest.TestCase):
             self.assertIn("Total 85s", window._highlights_summary.text())
             window.close()
 
+    def test_find_sermon_adds_one_adjustable_clip(self) -> None:
+        import ui.wizard_window as ww
+
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "service.mp4"
+            video.write_bytes(b"x")
+            window = ww.WizardWindow()
+            window._project.sermon_path = video
+            with mock.patch.object(ww, "find_sermon", return_value=(2253.0, 6735.0)) as finder, mock.patch.object(
+                ww, "api_key", side_effect=AssertionError("Find sermon must not need Claude")
+            ):
+                window._find_sermon()
+                self._wait(window)
+            finder.assert_called_once()
+            segments = [(s.start_text, s.end_text, s.label) for s in window._project.segments]
+            self.assertEqual(segments, [("00:37:33", "01:52:15", "Sermon")])
+            self.assertEqual(window._segment_list.currentRow(), 0)
+            self.assertEqual(window._seg_start.text(), "00:37:33")
+            self.assertIn("Sermon found", window._highlights_summary.text())
+            window.close()
+
     def test_asks_for_key_once_and_saves_it(self) -> None:
         import ui.wizard_window as ww
 

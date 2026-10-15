@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import math
@@ -212,6 +213,142 @@ def find_sermon_window(
     return best[0] * window_s, min(total, (best[1] + 1) * window_s)
 
 
+# Precise sermon bounds, for the free "Find sermon" trim: 60 s windows every 10 s.
+SERMON_STEP_S = 10.0
+SERMON_WINDOW_S = 60.0
+SERMON_MIN_WORDS = 70  # per minute, after collapsing repeats; preaching runs ~100-150
+SERMON_MIN_VARIETY = 0.45  # unique share of words; song lyrics repeat
+SERMON_MIN_S = 300.0
+SERMON_PAUSE_S = 4.0
+SERMON_EDGE_S = 30.0
+
+
+def _sounds_spoken(words: list[Word], start: float, end: float) -> bool:
+    """True if the words in [start, end) read like talking: several, and not a repeated lyric."""
+    tokens = [_token(w) for w in _collapse_repeats([w for w in words if start <= w.start < end])]
+    return len(tokens) >= 8 and len(set(tokens)) / len(tokens) >= 0.5
+
+
+def _phrase_after(words: list[Word], k: int) -> tuple[float, float]:
+    """From word k up to the next long pause (at most SERMON_EDGE_S)."""
+    j = k
+    while j + 1 < len(words) and words[j + 1].start - words[j].end < SERMON_PAUSE_S and words[j + 1].start < words[k].start + SERMON_EDGE_S:
+        j += 1
+    return words[k].start, words[j].end
+
+
+def _phrase_before(words: list[Word], k: int) -> tuple[float, float]:
+    """Back from word k to the previous long pause (at most SERMON_EDGE_S)."""
+    j = k
+    while j > 0 and words[j].start - words[j - 1].end < SERMON_PAUSE_S and words[j - 1].start > words[k].end - SERMON_EDGE_S:
+        j -= 1
+    return words[j].start, words[k].end + 0.001
+
+
+def _token(word: Word) -> str:
+    return word.text.strip().lower().strip(".,!?-'\"")
+
+
+def _collapse_repeats(words: list[Word]) -> list[Word]:
+    """Drop empty words and back-to-back repeats (Whisper hears music as "Organ Organ Organ...")."""
+    out: list[Word] = []
+    for w in words:
+        token = _token(w)
+        if token and not (out and _token(out[-1]) == token):
+            out.append(w)
+    return out
+
+
+def _preaching_windows(words: list[Word]) -> list[bool]:
+    clean = _collapse_repeats(words)
+    starts = [w.start for w in clean]
+    flags = []
+    for i in range(int(words[-1].end // SERMON_STEP_S) + 1):
+        t = i * SERMON_STEP_S
+        inside = clean[bisect.bisect_left(starts, t) : bisect.bisect_left(starts, t + SERMON_WINDOW_S)]
+        tokens = [_token(w) for w in inside]
+        flags.append(
+            len(tokens) >= SERMON_MIN_WORDS and len(set(tokens)) / max(1, len(tokens)) >= SERMON_MIN_VARIETY
+        )
+    return flags
+
+
+def _longest_preaching_run(flags: list[bool]) -> tuple[int, int] | None:
+    runs: list[list[int]] = []
+    i = 0
+    while i < len(flags):
+        if not flags[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(flags) and flags[j + 1]:
+            j += 1
+        gap_s = (i - runs[-1][1] - 1) * SERMON_STEP_S if runs else math.inf
+        long_run = (j - i + 1) * SERMON_STEP_S >= 120
+        # A short break (a song cue, a garbled minute) doesn't end the sermon if more preaching follows.
+        if gap_s <= 30 or (gap_s <= 120 and long_run):
+            runs[-1][1] = j
+        else:
+            runs.append([i, j])
+        i = j + 1
+    if not runs:
+        return None
+    first, last = max(runs, key=lambda r: r[1] - r[0])
+    return first, last
+
+
+def locate_sermon(words: list[Word]) -> tuple[float, float] | None:
+    """Start/end seconds of the sermon, cut at pauses in speech; None if there's no clear sermon.
+
+    The sermon is the longest stretch where every minute is dense, varied speech;
+    the edges snap to the pause where speaking starts and stops.
+    """
+    words = [w for w in words if w.text.strip()]
+    if not words:
+        return None
+    run = _longest_preaching_run(_preaching_windows(words))
+    if run is None:
+        return None
+    first_t = run[0] * SERMON_STEP_S
+    last_t = run[1] * SERMON_STEP_S
+    if last_t + SERMON_WINDOW_S - first_t < SERMON_MIN_S:
+        return None
+    # Edges: the pause where speech (not lyrics) begins, and where it stops.
+    reach = SERMON_EDGE_S
+    starts = [
+        k for k, w in enumerate(words)
+        if first_t - reach <= w.start < first_t + SERMON_WINDOW_S
+        and (k == 0 or w.start - words[k - 1].end >= SERMON_PAUSE_S)
+    ]
+    start_k = next(
+        (k for k in starts if _sounds_spoken(words, *_phrase_after(words, k))),
+        bisect.bisect_left([w.start for w in words], first_t),
+    )
+    ends = [
+        k for k, w in enumerate(words)
+        if last_t < w.start < last_t + SERMON_WINDOW_S + reach
+        and (k + 1 == len(words) or words[k + 1].start - w.end >= SERMON_PAUSE_S)
+    ]
+    end_k = next(
+        (k for k in reversed(ends) if _sounds_spoken(words, *_phrase_before(words, k))),
+        bisect.bisect_left([w.start for w in words], last_t + SERMON_WINDOW_S) - 1,
+    )
+    start = whole_second_start(words[start_k].start, words[start_k - 1].end + 0.02 if start_k > 0 else 0.0)
+    end = whole_second_end(words[end_k].end, words[end_k + 1].start - 0.02 if end_k + 1 < len(words) else math.inf)
+    return start, end
+
+
+def find_sermon(src: Path, *, progress_cb: ProgressCb = None, should_cancel: ShouldCancel = None) -> tuple[float, float]:
+    """Free (no Claude): transcribe the service and return the sermon's start/end in seconds."""
+    words = transcribe_service(src, progress_cb=progress_cb, should_cancel=should_cancel)
+    _progress(progress_cb, 0.9, "Finding the sermon…")
+    bounds = locate_sermon(words)
+    if bounds is None:
+        raise RuntimeError("Couldn't find a clear sermon in this video. Mark the start and end on the player.")
+    _progress(progress_cb, 1.0, f"Sermon found: {format_clock(bounds[0])}–{format_clock(bounds[1])}")
+    return bounds
+
+
 # --- 3. Sentences and Claude -------------------------------------------------------
 
 
@@ -403,7 +540,7 @@ def find_highlights(
     """The whole pipeline for one service video."""
     words = transcribe_service(src, progress_cb=progress_cb, should_cancel=should_cancel)
     _progress(progress_cb, 0.65, "Finding the sermon…")
-    start, end = find_sermon_window(words)
+    start, end = locate_sermon(words) or find_sermon_window(words)
     sents = sentences(words, start, end)
     if len(sents) < 10:
         raise RuntimeError("Couldn't find enough speech to pick highlights from. Choose timestamps manually.")
