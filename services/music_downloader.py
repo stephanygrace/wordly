@@ -82,6 +82,8 @@ def _download_with_executable(
         "--color",
         "never",
         "--newline",
+        # --print implies --quiet, which hides the [download] percentage lines.
+        "--progress",
         "--print",
         "after_move:filepath",
     ]
