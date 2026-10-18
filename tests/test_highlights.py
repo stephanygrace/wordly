@@ -165,6 +165,43 @@ class TestBuildPlan(unittest.TestCase):
         picks = [{"start_sentence": a, "end_sentence": a + 3, "title": f"h{a}", "reason": "r"} for a in (1, 10, 20, 30)]
         self.assertLessEqual(len(build_plan({"highlights": picks}, sents).highlights), 3)
 
+    def test_backup_suggestions_fill_in_for_rejected_ones(self) -> None:
+        sents = _sents([10] * 40)
+        picks = [{"start_sentence": 99, "end_sentence": 100, "title": "bad", "reason": "r"}] + [
+            {"start_sentence": a, "end_sentence": a + 2, "title": f"h{a}", "reason": "r"} for a in (1, 11, 21, 31)
+        ]
+        plan = build_plan({"highlights": picks}, sents)
+        self.assertEqual([h.title for h in plan.highlights], ["h1", "h11", "h21"])
+
+    def test_never_spans_a_long_silence(self) -> None:
+        # 3 s of dead air between sentence 3 and 4: keep the longer side.
+        sents = [Sentence(1, 100.0, 108.0, "one."), Sentence(2, 108.3, 116.0, "two."),
+                 Sentence(3, 116.3, 124.0, "three."), Sentence(4, 127.0, 134.0, "four.")]
+        plan = build_plan({"highlights": [{"start_sentence": 1, "end_sentence": 4, "title": "t", "reason": "r"}]}, sents)
+        h = plan.highlights[0]
+        self.assertLess(h.end, 127.0)
+        self.assertEqual(h.start, hl.whole_second_start(100.0))
+        self.assertIn("long pause", plan.notes[0])
+
+    def test_leaves_out_reading_from_the_screen(self) -> None:
+        sents = _sents([10] * 6)  # 1000–1061.5
+        reading = [(sents[3].start - 1, sents[5].end + 1)]  # sentences 4–6
+        pick = {"start_sentence": 1, "end_sentence": 6, "title": "t", "reason": "r"}
+        plan = build_plan({"highlights": [pick]}, sents, reading)
+        self.assertLess(plan.highlights[0].end, sents[3].start + 1)  # at most a hair into it
+        self.assertIn("screen reading", plan.notes[0])
+        all_reading = build_plan({"highlights": [dict(pick, start_sentence=4)]}, sents, reading)
+        self.assertEqual(all_reading.highlights, [])
+        self.assertIn("reads from the screen", all_reading.notes[0])
+
+    def test_transcript_marks_silence_and_screen_reading(self) -> None:
+        sents = [Sentence(1, 100.0, 110.0, "teaching."), Sentence(2, 114.0, 124.0, "after a pause."),
+                 Sentence(3, 124.3, 134.0, "reading a verse.")]
+        lines = hl.transcript_lines(sents, [(124.0, 140.0)]).splitlines()
+        self.assertEqual(lines[0], "S1 [0:01:40 +10s] teaching.")
+        self.assertIn("(after 4 s of silence) after a pause.", lines[1])
+        self.assertIn("(reading the screen) reading a verse.", lines[2])
+
 
 class _FakeClaude:
     def __init__(self, payload: dict, stop_reason: str = "end_turn") -> None:
@@ -273,6 +310,39 @@ class TestFindHighlights(unittest.TestCase):
         self.assertEqual(plan.usage.output_tokens, 1_463)
         self.assertEqual(plan.highlights[0].start, hl.whole_second_start(sermon[9].start, sermon[8].end + 0.02))
         self.assertEqual(steps, sorted(steps))
+
+    def test_screen_reading_is_marked_for_lux_and_cut_from_clips(self) -> None:
+        words = sorted(_song(0, 1200) + _speech(1200, 3600) + _song(3600, 4200), key=lambda w: w.start)
+        sermon = sentences(words, 1200, 3600)
+        reading = [(sermon[12].start, sermon[13].end)]
+        payload = {
+            "sermon_title": "t",
+            "highlights": [{"start_sentence": 10, "end_sentence": 14, "title": "one", "reason": "r"}],
+            "verse": {"reference": "Psalm 23:1", "text": "...", "reason": "r"},
+        }
+        fake = _FakeClaude(payload)
+        with mock.patch.object(hl, "transcribe_service", return_value=words), mock.patch.object(
+            hl, "find_screen_reading", return_value=reading
+        ) as gaze:
+            plan = hl.find_highlights(Path("service.mp4"), claude=fake)
+        self.assertEqual(gaze.call_args.args[1], [(plan.sermon_start, plan.sermon_end)])
+        self.assertIn(f"S13 [{hl.format_clock(sermon[12].start)} +", fake.calls[0]["messages"][0]["content"])
+        self.assertIn("(reading the screen)", fake.calls[0]["messages"][0]["content"])
+        self.assertLessEqual(plan.highlights[0].end, sermon[12].start + 1)
+
+    def test_missing_gaze_check_is_noted_not_fatal(self) -> None:
+        words = sorted(_song(0, 1200) + _speech(1200, 3600), key=lambda w: w.start)
+        payload = {
+            "sermon_title": "t",
+            "highlights": [{"start_sentence": 10, "end_sentence": 14, "title": "one", "reason": "r"}],
+            "verse": {"reference": "Psalm 23:1", "text": "...", "reason": "r"},
+        }
+        with mock.patch.object(hl, "transcribe_service", return_value=words), mock.patch.object(
+            hl, "find_screen_reading", side_effect=RuntimeError("needs macOS (Apple Vision)")
+        ):
+            plan = hl.find_highlights(Path("service.mp4"), claude=_FakeClaude(payload))
+        self.assertEqual(len(plan.highlights), 1)
+        self.assertIn("needs macOS", plan.notes[-1])
 
     def test_format_timecode_for_wizard(self) -> None:
         self.assertEqual(hl.format_timecode(3000.0), "00:50:00")
