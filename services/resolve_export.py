@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -272,7 +273,66 @@ def _add_caption_titles(
 
 
 # Background song level under the sermon audio.
-MUSIC_GAIN_DB = -15.0
+MUSIC_GAIN_DB = -10.0
+# The song fades in over the reel's first seconds and to silence over its last.
+MUSIC_FADE_S = 3.0
+
+
+# Quieter than this counts as the silence some songs open with.
+MUSIC_SILENCE_DB = -50
+_SILENCE_END_RE = re.compile(r"silence_end: ([0-9.]+)")
+
+
+def _leading_silence_s(src: Path) -> float:
+    """Seconds of silence before *src*'s first sound (0 if it starts right away or ffmpeg fails)."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-nostats", "-t", "60", "-i", str(src),
+                "-af", f"silencedetect=n={MUSIC_SILENCE_DB}dB:d=0.3", "-f", "null", "-",
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return 0.0
+    stderr = getattr(proc, "stderr", None)
+    stderr = stderr if isinstance(stderr, str) else ""
+    # Only a silence that starts at 0 is leading silence.
+    if "silence_start: 0\n" not in stderr and "silence_start: 0.0" not in stderr:
+        return 0.0
+    match = _SILENCE_END_RE.search(stderr)
+    return float(match.group(1)) if match else 0.0
+
+
+def _fade_music(src: Path, *, end_s: float, fade_s: float = MUSIC_FADE_S) -> Path:
+    """A copy of *src* from its first sound, *end_s* long, fading in over its first
+    *fade_s* seconds and to silence over its last *fade_s* seconds.
+
+    Baked into the file because Resolve doesn't reliably import volume keyframes
+    from FCPXML; the clip volume stays editable. Falls back to *src* if ffmpeg fails.
+    """
+    # Some songs open with seconds of silence; skip it so the fade-in is heard.
+    lead_s = _leading_silence_s(src)
+    end_s = min(end_s, max(_safe_duration(src, fallback_s=end_s) - lead_s, 0.0)) or end_s
+    # A reel shorter than both fades splits its length between them.
+    fade_s = min(fade_s, end_s / 2)
+    dest = src.with_name(f"{src.stem}_fade.m4a")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error", "-ss", f"{lead_s:.3f}", "-i", str(src),
+                "-t", f"{end_s:.3f}",
+                "-af",
+                f"afade=t=in:st=0:d={fade_s:.3f},afade=t=out:st={end_s - fade_s:.3f}:d={fade_s:.3f}",
+                "-vn", "-c:a", "aac", "-b:a", "192k", str(dest),
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return src
+    return dest if dest.is_file() and dest.stat().st_size > 0 else src
 
 # Captions use lanes 1-2; the verse sits above them.
 VERSE_LANE = 3
@@ -812,6 +872,10 @@ def generate_resolve_project(
         project.selected_verse.text,
         sermon_duration_s,
     )
+
+    if music_path is not None:
+        _progress(progress_cb, 0.91, "Fading the music in and out…")
+        music_path = _fade_music(music_path, end_s=timeline_duration_s)
 
     _progress(progress_cb, 0.92, "Writing FCPXML timeline…")
     root = _build_fcpxml(

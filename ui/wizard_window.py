@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QStackedWidget,
+    QTabBar,
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
@@ -75,6 +76,7 @@ from utils.timecode import (
     format_timecode,
     normalize_four_digit_timecode,
     parse_timecode,
+    parse_timestamp_list,
     validate_segment_times,
 )
 
@@ -668,7 +670,8 @@ class WizardWindow(QMainWindow):
             "Let Lux pick",
             "Lux picks 2–3 highlights (2 minutes max) plus the Bible verse. To narrow the search, "
             "trim first: Find sermon cuts out the songs for free, or add a clip around the part to "
-            "scan, and Lux looks only there. With no clips, Lux scans the whole video.",
+            "scan, and Lux looks only there. Or paste a list of times and Lux scans 60 s from each. "
+            "With no clips, Lux scans the whole video.",
         )
         set_prop(lux_card, "accent", "true")
         self._find_sermon_btn = button(
@@ -676,9 +679,15 @@ class WizardWindow(QMainWindow):
             tooltip="Free, no Lux: skips the opening songs and adds the sermon as a clip you can adjust.",
             on_click=self._find_sermon,
         )
-        self._find_highlights_btn = button("✦  Let Lux pick highlights", "Primary", on_click=self._find_highlights)
+        self._find_highlights_btn = button("✦  Let Lux pick highlights", "Primary", on_click=lambda: self._find_highlights())
+        self._paste_times_btn = button(
+            "Paste times",
+            tooltip="Paste start times (e.g. 101, 149 = 1:01:00, 1:49:00); each becomes a 60 s clip Lux scans.",
+            on_click=self._paste_timestamps,
+        )
         lux_actions = QHBoxLayout()
         lux_actions.addWidget(self._find_sermon_btn)
+        lux_actions.addWidget(self._paste_times_btn)
         lux_actions.addWidget(self._find_highlights_btn, 1)
         lux_card.body.addLayout(lux_actions)
         self._highlights_summary = label("", "Notice", wrap=True)
@@ -757,7 +766,8 @@ class WizardWindow(QMainWindow):
         toggle_card.body.addWidget(label(backend_text, "Muted", wrap=True))
         layout.addWidget(toggle_card)
 
-        row, (left, right) = self._columns(2, 3)
+        # Transcript first, the clip preview beside it on the right.
+        row, (left, right) = self._columns(3, 2)
         layout.addWidget(row)
 
         try:
@@ -789,6 +799,7 @@ class WizardWindow(QMainWindow):
         self._caption_player = PreviewPlayer()
         self._caption_player.position_changed_ms.connect(self._on_caption_player_position)
         self._caption_clip_idx: int | None = None
+        self._caption_view_clip = 0  # the clip being reviewed: its captions in the table, it in the preview
         self._live_caption: tuple[int, int, float] | None = None  # clip, caption, seconds
         self._caption_rows: dict[tuple[int, int], int] = {}
         self._style_card.body.addWidget(self._caption_style_combo)
@@ -802,8 +813,8 @@ class WizardWindow(QMainWindow):
                 wrap=True,
             )
         )
-        left.addWidget(self._style_card)
-        left.addStretch(1)
+        right.addWidget(self._style_card)
+        right.addStretch(1)
 
         self._transcript_card = Card("Transcript")
         self._transcribe_btn = button("Transcribe", "PrimarySmall", on_click=lambda: self._start_transcription())
@@ -817,6 +828,14 @@ class WizardWindow(QMainWindow):
         self._transcript_card.header.addWidget(self._insert_caption_btn)
         self._transcript_card.header.addWidget(self._delete_caption_btn)
         self._transcript_card.header.addWidget(self._transcribe_btn)
+        # One clip at a time: pick it here; the table and the preview follow.
+        self._caption_clip_tabs = QTabBar()
+        self._caption_clip_tabs.setObjectName("ClipTabs")
+        self._caption_clip_tabs.setExpanding(False)
+        self._caption_clip_tabs.setDrawBase(False)
+        self._caption_clip_tabs.setVisible(False)
+        self._caption_clip_tabs.currentChanged.connect(self._on_caption_clip_tab)
+        self._transcript_card.body.addWidget(self._caption_clip_tabs)
         self._captions_status = label("", "Muted", wrap=True)
         self._transcript_card.body.addWidget(self._captions_status)
         self._captions_table = QTableWidget(0, 3)
@@ -828,6 +847,7 @@ class WizardWindow(QMainWindow):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._captions_table.setColumnHidden(0, True)  # the clip is chosen with the tabs above
         self._captions_table.setMinimumHeight(260)
         self._captions_table.itemChanged.connect(self._on_caption_edited)
         self._captions_table.currentCellChanged.connect(lambda row, *_: self._play_caption_row(row))
@@ -840,7 +860,7 @@ class WizardWindow(QMainWindow):
         )
         self._caption_player.attach_space_shortcut(page)
         self._transcript_card.body.addWidget(self._captions_table)
-        right.addWidget(self._transcript_card)
+        left.addWidget(self._transcript_card)
 
         self._render_caption_preview()
         return page
@@ -870,8 +890,9 @@ class WizardWindow(QMainWindow):
             self._caption_preview_timer.stop()
             return
         sample = "God is good all the time"
-        if self._project.captions_current():
-            first = next((c for clip in self._project.clip_captions for c in clip), None)
+        clips = self._project.clip_captions
+        if self._project.captions_current() and self._caption_view_clip < len(clips):
+            first = next(iter(clips[self._caption_view_clip]), None)
             if first is not None:
                 sample = first.text
         words = style.display_text(sample).split()
@@ -909,8 +930,9 @@ class WizardWindow(QMainWindow):
         if not (0 <= clip_idx < len(clips)) or not clips[clip_idx].exists():
             return False
         if self._caption_clip_idx != clip_idx:
-            self._caption_player.load_file(clips[clip_idx])
+            # Set first: loading reports position 0, which must be read as this clip's.
             self._caption_clip_idx = clip_idx
+            self._caption_player.load_file(clips[clip_idx])
         return True
 
     def _play_caption_row(self, row: int) -> None:
@@ -953,7 +975,50 @@ class WizardWindow(QMainWindow):
     def _reset_caption_player(self) -> None:
         self._caption_player.clear()
         self._caption_clip_idx = None
+        self._caption_view_clip = 0
         self._live_caption = None
+
+    def _refresh_caption_tabs(self) -> None:
+        """One tab per transcribed clip (hidden when there's only one)."""
+        tabs = self._caption_clip_tabs
+        clips = self._project.clip_captions if self._project.captions_current() else []
+        tabs.blockSignals(True)
+        while tabs.count() > len(clips):
+            tabs.removeTab(tabs.count() - 1)
+        while tabs.count() < len(clips):
+            tabs.addTab("")
+        for i, captions in enumerate(clips):
+            seg = self._project.segments[i] if i < len(self._project.segments) else None
+            title = seg.label.strip() if seg else ""
+            short = title if len(title) <= 22 else title[:21].rstrip() + "…"
+            tabs.setTabText(i, f"{i + 1} · {short}" if short else f"Clip {i + 1}")
+            n = len(captions)
+            tabs.setTabToolTip(i, (f"{title} · " if title else "") + f"{n} caption{'s' if n != 1 else ''}")
+        self._caption_view_clip = min(self._caption_view_clip, max(0, len(clips) - 1))
+        if clips:
+            tabs.setCurrentIndex(self._caption_view_clip)
+        tabs.blockSignals(False)
+        tabs.setVisible(len(clips) > 1)
+
+    def _on_caption_clip_tab(self, index: int) -> None:
+        if index >= 0:
+            self._show_caption_clip(index)
+
+    def _show_caption_clip(self, clip_idx: int) -> None:
+        """Review one clip: its captions in the table, the clip itself in the preview."""
+        if clip_idx != self._caption_clip_idx:
+            self._caption_player.pause()
+        self._caption_view_clip = clip_idx
+        self._live_caption = None
+        self._load_caption_clip(clip_idx)
+        tabs = self._caption_clip_tabs
+        if tabs.currentIndex() != clip_idx:
+            tabs.blockSignals(True)
+            tabs.setCurrentIndex(clip_idx)
+            tabs.blockSignals(False)
+        self._fill_captions_table(self._project.clip_captions)
+        self._captions_status.setText(self._captions_status_text())
+        self._render_caption_preview()
 
     def _captions_enabled(self) -> bool:
         return hasattr(self, "_auto_captions_check") and self._auto_captions_check.isChecked()
@@ -976,12 +1041,14 @@ class WizardWindow(QMainWindow):
         self._delete_caption_btn.setEnabled(editable)
 
         if not self._project.captions_current():
-            self._fill_captions_table([])
             self._reset_caption_player()
+            self._refresh_caption_tabs()
+            self._fill_captions_table([])
         else:
+            self._refresh_caption_tabs()
             self._fill_captions_table(self._project.clip_captions)
-            if self._caption_clip_idx is None and enabled:
-                self._load_caption_clip(0)  # show the first frame, ready to play
+            if enabled and self._caption_clip_idx != self._caption_view_clip:
+                self._load_caption_clip(self._caption_view_clip)  # show the first frame, ready to play
 
         self._captions_status.setText(self._captions_status_text())
         self._render_caption_preview()
@@ -990,9 +1057,12 @@ class WizardWindow(QMainWindow):
         if not self._captions_enabled():
             return "Captions are off. Continue to skip this step."
         if self._project.captions_current():
-            count = sum(len(c) for c in self._project.clip_captions)
+            clips = self._project.clip_captions
+            view = min(self._caption_view_clip, len(clips) - 1)
+            count = len(clips[view]) if clips else 0
+            where = f"Clip {view + 1} of {len(clips)}: " if len(clips) > 1 else ""
             return (
-                f"{count} captions from {len(self._project.clip_captions)} clip(s). Double-click to fix words or times. "
+                f"{where}{count} captions. Double-click to fix words or times. "
                 "Missing words? Pause the clip where they're said and click ＋ Insert line."
             )
         if self._project.clip_captions:
@@ -1005,6 +1075,8 @@ class WizardWindow(QMainWindow):
         table.setRowCount(0)
         self._caption_rows = {}
         for clip_idx, captions in enumerate(clip_captions):
+            if clip_idx != self._caption_view_clip:
+                continue  # one clip at a time
             for cap_idx, cap in enumerate(captions):
                 row = table.rowCount()
                 table.insertRow(row)
@@ -1086,6 +1158,9 @@ class WizardWindow(QMainWindow):
             return float("inf")
 
     def _refresh_caption_rows(self, select: tuple[int, int] | None = None, *, edit_text: bool = False) -> None:
+        if select and select[0] != self._caption_view_clip:
+            self._show_caption_clip(select[0])
+        self._refresh_caption_tabs()
         self._fill_captions_table(self._project.clip_captions)
         table = self._captions_table
         row = self._caption_rows.get(select) if select else None
@@ -1119,10 +1194,12 @@ class WizardWindow(QMainWindow):
         item = self._captions_table.item(self._captions_table.currentRow(), 2)
         key = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if not key:
-            nonempty = [i for i, caps in enumerate(all_caps) if caps]
-            if not nonempty:
-                return (0, 0, 0.0, 3.0) if all_caps else None
-            key = (nonempty[0], len(all_caps[nonempty[0]]) - 1)
+            view = self._caption_view_clip
+            if view >= len(all_caps):
+                return None
+            if not all_caps[view]:
+                return view, 0, 0.0, min(3.0, self._clip_duration(view))
+            key = (view, len(all_caps[view]) - 1)
         clip_idx, cap_idx = key
         caps = all_caps[clip_idx]
         cur = caps[cap_idx]
@@ -1503,6 +1580,7 @@ class WizardWindow(QMainWindow):
             btn.setEnabled(not self._busy)
         self._find_highlights_btn.setEnabled(not self._busy and self._step_complete(S_SOURCE))
         self._find_sermon_btn.setEnabled(not self._busy and self._step_complete(S_SOURCE))
+        self._paste_times_btn.setEnabled(not self._busy and self._step_complete(S_SOURCE))
         self._save_clips_btn.setEnabled(not self._busy and self._step_complete(S_HIGHLIGHTS))
         self._transcribe_btn.setEnabled(
             self._captions_enabled() and not self._busy and bool(self._project.clip_paths)
@@ -1884,7 +1962,35 @@ class WizardWindow(QMainWindow):
             message="Listening for the sermon — a few minutes the first time…",
         )
 
-    def _find_highlights(self) -> None:
+    def _paste_timestamps(self) -> None:
+        """Turn pasted start times into 60 s clips, then let Lux scan just those."""
+        sermon = self._project.sermon_path
+        if not sermon or not sermon.is_file():
+            QMessageBox.warning(self, "Wordly", "Load the service video first.")
+            return
+        text, ok = QInputDialog.getMultiLineText(
+            self,
+            "Paste times",
+            "One start time per line. 101 means 1:01:00; 1:49:30 is exact.\n"
+            "Each becomes a 60-second clip, and Lux picks highlights from inside them.",
+        )
+        if not ok or not text.strip():
+            return
+        try:
+            windows = parse_timestamp_list(text, length_s=60.0, media_duration_s=self._project.sermon_duration_s or None)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Wordly", str(exc))
+            return
+        self._project.segments = [
+            ClipSegment(highlight_timecode(start), highlight_timecode(end)) for start, end in windows
+        ]
+        self._invalidate_clips()
+        self._refresh_segment_list()
+        self._on_segment_row_changed(-1)
+        self._update_nav()
+        self._find_highlights(confirm=False)
+
+    def _find_highlights(self, *, confirm: bool = True) -> None:
         sermon = self._project.sermon_path
         if not sermon or not sermon.is_file():
             QMessageBox.warning(self, "Wordly", "Load the service video first.")
@@ -1896,7 +2002,7 @@ class WizardWindow(QMainWindow):
                 ranges.append((_seconds(seg.start_text), _seconds(seg.end_text)))
             except ValueError:
                 continue
-        if ranges:
+        if ranges and confirm:
             total = sum(b - a for a, b in ranges)
             parts = "this part" if len(ranges) == 1 else f"these {len(ranges)} parts"
             answer = QMessageBox.question(

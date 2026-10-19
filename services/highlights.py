@@ -8,10 +8,13 @@ Lux is Wordly's name for the assistant; it runs on Claude Opus 5.5.
 2. Scan range: the ranges the user trimmed, or else the sermon located
    automatically as the longest stretch of dense, real speech (worship songs
    come out as sparse or repeated "Amen. Amen." text).
-3. Number the sentences with their start time and length, and ask Claude for
-   2-3 self-contained highlights (sentence ranges) plus the Bible verse the
-   sermon is built on.
-4. Validate in code: 2-3 clips, 12-60 s each, no overlaps, at most 120 s total.
+3. Watch where the speaker looks (services.screen_gaze) to find where they
+   read from the off-camera screen.
+4. Number the sentences with their start time and length, mark long silences
+   and screen reading, and ask Claude for 4-5 ranked, self-contained highlights
+   (sentence ranges) plus the Bible verse the sermon is built on.
+5. Validate in code: the first 2-3 good clips, 12-60 s each, no 3 s silence or
+   screen reading inside, no overlaps, at most 120 s total.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from services.screen_gaze import find_screen_reading
 from services.transcribe import Word, transcribe_words
 from utils.paths import TEMP
 
@@ -42,6 +46,8 @@ MAX_TOTAL_S = 120.0
 MIN_CLIP_S = 12.0
 MAX_CLIP_S = 60.0
 MAX_CLIPS = 3
+# A silence this long inside a clip reads as dead air; a clip never spans one.
+MAX_IDLE_S = 3.0
 # Breathing room around each cut.
 LEAD_IN_S = 0.15
 TAIL_S = 0.35
@@ -511,17 +517,40 @@ def sentences(words: list[Word], start: float, end: float, *, max_s: float = 20.
     return out
 
 
-def transcript_lines(sents: list[Sentence]) -> str:
-    return "\n".join(f"S{s.index} [{format_clock(s.start)} +{s.end - s.start:.0f}s] {s.text}" for s in sents)
+def _idle_before(sents: list[Sentence], k: int) -> float:
+    """Seconds of silence between sentence k and the one before it."""
+    return sents[k].start - sents[k - 1].end if k > 0 else 0.0
+
+
+def reads_screen(sentence: Sentence, reading: list[tuple[float, float]]) -> bool:
+    """True if the speaker is reading from the screen for at least half of *sentence*."""
+    overlap = sum(max(0.0, min(b, sentence.end) - max(a, sentence.start)) for a, b in reading)
+    return overlap >= 0.5 * max(0.1, sentence.end - sentence.start)
+
+
+def transcript_lines(sents: list[Sentence], reading: list[tuple[float, float]] = ()) -> str:
+    lines = []
+    for k, s in enumerate(sents):
+        marks = ""
+        if _idle_before(sents, k) >= MAX_IDLE_S:
+            marks += f"(after {_idle_before(sents, k):.0f} s of silence) "
+        if reads_screen(s, reading):
+            marks += "(reading the screen) "
+        lines.append(f"S{s.index} [{format_clock(s.start)} +{s.end - s.start:.0f}s] {marks}{s.text}")
+    return "\n".join(lines)
 
 
 SYSTEM_PROMPT = """You edit short vertical highlight reels for a Filipino church's Facebook page.
 
 You get the transcript of one sermon, preached in Taglish (Tagalog mixed with English). It was transcribed automatically, so some words are wrong; read past the mistakes to what the preacher meant. Each line is one sentence: its number, its start time, its length in seconds, then the text.
 
-Choose 2 or 3 highlights. They will be cut out and played back to back as one reel, so together they must last at most 120 seconds; use the sentence lengths to stay under it. Each highlight is a continuous range of sentences (start_sentence to end_sentence) lasting roughly 20 to 50 seconds. A viewer scrolling past has not heard the rest of the sermon, so each highlight must make sense on its own: start where a thought begins and end on a strong, complete line.
+List 4 or 5 candidate highlights, best first. The app keeps the first 2 or 3 that pass its checks and plays them back to back as one reel, so your top three together must last at most 120 seconds; use the sentence lengths to stay under it. The rest are backups. Each highlight is a continuous range of sentences (start_sentence to end_sentence) lasting roughly 20 to 50 seconds. A viewer scrolling past has not heard the rest of the sermon, so each highlight must make sense on its own: start where a thought begins and end on a strong, complete line.
 
-Every highlight must be a lesson: the preacher teaching directly, such as the sermon's core message, a truth explained plainly, or a direct challenge or encouragement to the listener. Do not pick stories, illustrations, testimonies, or retellings of Bible narratives, even vivid ones; if a story leads into a lesson, start the highlight where the lesson begins. Leave out greetings, announcements, prayers, long Bible readings, jokes that need earlier context, references to things on screen, and passages that are mostly transcription noise. Take the highlights from different parts of the sermon and list them in the order they happen. Give each a short title (2 to 5 words, in the sermon's language) and a one-sentence reason.
+Every highlight must be a lesson: the preacher teaching directly, such as the sermon's core message, a truth explained plainly, or a direct challenge or encouragement to the listener. Do not pick stories, illustrations, testimonies, or retellings of Bible narratives, even vivid ones; if a story leads into a lesson, start the highlight where the lesson begins. Leave out greetings, announcements, prayers, long Bible readings, jokes that need earlier context, references to things on screen, and passages that are mostly transcription noise.
+
+The camera can't see the projector screen. Never pick lines where the preacher reads aloud from it (slides, points, or a verse); they look away from the viewer the whole time. Lines marked (reading the screen) are those moments, seen on the video; never include one in a highlight. Also leave out any passage that reads like a slide or a quoted verse, even unmarked. A line marked (after N s of silence) follows a long pause, which is dead air in a reel: a highlight may start at that line but must never run across the pause.
+
+Take the highlights from different parts of the sermon. Give each a short title (2 to 5 words, in the sermon's language) and a one-sentence reason.
 
 Also choose the one Bible verse that best captures the sermon's message, preferring the passage the preacher is preaching from. Give its reference and its text in English (NIV wording). It will be shown on screen, and a person will check the wording before publishing."""
 
@@ -559,9 +588,16 @@ OUTPUT_SCHEMA = {
 }
 
 
-def ask_claude(sents: list[Sentence], claude=None, *, ledger: Path | None = None) -> tuple[dict, LuxUsage]:
+def ask_claude(
+    sents: list[Sentence],
+    claude=None,
+    *,
+    ledger: Path | None = None,
+    reading: list[tuple[float, float]] = (),
+) -> tuple[dict, LuxUsage]:
     """Send the numbered sermon to Claude Opus 5.5; return its parsed JSON choice and the tokens used.
 
+    *reading* is where the speaker reads from the screen; those sentences are marked.
     With *ledger*, the tokens are recorded there even if the answer turns out unusable.
     """
     if claude is None:
@@ -582,7 +618,7 @@ def ask_claude(sents: list[Sentence], claude=None, *, ledger: Path | None = None
                 "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
             },
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": "Sermon transcript:\n\n" + transcript_lines(sents)}],
+            messages=[{"role": "user", "content": "Sermon transcript:\n\n" + transcript_lines(sents, reading)}],
         )
     except anthropic.AuthenticationError as exc:
         raise RuntimeError("The Anthropic API key was rejected. Check ANTHROPIC_API_KEY in the project's .env.") from exc
@@ -615,17 +651,45 @@ def _is_filler(sentence: Sentence) -> bool:
     return len(sentence.text.split()) <= 2 and sentence.end - sentence.start < 2.0
 
 
-def build_plan(data: dict, sents: list[Sentence]) -> HighlightPlan:
-    """Turn Claude's sentence ranges into clean, rule-abiding cuts."""
+def _clean_runs(chosen: list[Sentence], reading: list[tuple[float, float]]) -> list[list[Sentence]]:
+    """*chosen* split at long silences, without the sentences read from the screen."""
+    runs: list[list[Sentence]] = [[]]
+    for k, s in enumerate(chosen):
+        if k > 0 and s.start - chosen[k - 1].end >= MAX_IDLE_S:
+            runs.append([])
+        if reads_screen(s, reading):
+            runs.append([])
+        else:
+            runs[-1].append(s)
+    return [run for run in runs if run]
+
+
+def build_plan(data: dict, sents: list[Sentence], reading: list[tuple[float, float]] = ()) -> HighlightPlan:
+    """Turn Claude's ranked sentence ranges into clean, rule-abiding cuts.
+
+    The first MAX_CLIPS suggestions that survive the checks are kept. A clip never
+    spans a silence of MAX_IDLE_S or includes a sentence read from the screen
+    (*reading*); it is cut down to its longest clean part instead.
+    """
     by_index = {s.index: s for s in sents}
     notes: list[str] = []
     picked: list[Highlight] = []
-    for raw in data.get("highlights", [])[:MAX_CLIPS]:
+    for raw in data.get("highlights", []):
+        if len(picked) == MAX_CLIPS:
+            break
         first, last = int(raw.get("start_sentence", 0)), int(raw.get("end_sentence", 0))
         if first not in by_index or last not in by_index or last < first:
             notes.append(f"Skipped an invalid suggestion (S{first}–S{last}).")
             continue
         chosen = [by_index[i] for i in range(first, last + 1) if i in by_index]
+        runs = _clean_runs(chosen, reading)
+        if not runs:
+            notes.append(f"Skipped “{raw.get('title', '')}” (the speaker reads from the screen).")
+            continue
+        if len(runs) > 1 or len(runs[0]) < len(chosen):
+            why = "screen reading" if any(reads_screen(s, reading) for s in chosen) else "a long pause"
+            chosen = max(runs, key=lambda run: run[-1].end - run[0].start)
+            notes.append(f"Shortened “{raw.get('title', '')}” to leave out {why}.")
         # Don't open or close on a dangling filler ("So,", "Okay?", "No?").
         while len(chosen) > 1 and _is_filler(chosen[-1]):
             chosen.pop()
@@ -674,6 +738,29 @@ def build_plan(data: dict, sents: list[Sentence]) -> HighlightPlan:
     )
 
 
+def _screen_reading(
+    src: Path,
+    spans: list[tuple[float, float]],
+    *,
+    progress_cb: ProgressCb = None,
+    should_cancel: ShouldCancel = None,
+) -> tuple[list[tuple[float, float]], str]:
+    """Where the speaker reads from the screen, and a note if that couldn't be checked."""
+    _progress(progress_cb, 0.66, "Watching where the speaker looks…")
+    try:
+        reading = find_screen_reading(
+            src,
+            spans,
+            progress_cb=lambda r, m: _progress(progress_cb, 0.66 + 0.04 * r, m),
+            should_cancel=should_cancel,
+        )
+    except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
+        if str(exc) == "Cancelled":
+            raise
+        return [], f"Couldn't check whether the speaker reads from the screen ({exc})."
+    return reading, ""
+
+
 def find_highlights(
     src: Path,
     *,
@@ -704,11 +791,16 @@ def find_highlights(
         where = "the sermon"
     if len(sents) < 10:
         raise RuntimeError("Couldn't find enough speech to pick highlights from. Choose timestamps manually.")
+    reading, gaze_note = _screen_reading(
+        src, sorted(ranges) if ranges else [(start, end)], progress_cb=progress_cb, should_cancel=should_cancel
+    )
     if should_cancel is not None and should_cancel():
         raise RuntimeError("Cancelled")
     _progress(progress_cb, 0.7, f"Lux is picking highlights from {where} ({format_clock(start)}–{format_clock(end)})…")
-    data, usage = ask_claude(sents, claude, ledger=ledger)
-    plan = build_plan(data, sents)
+    data, usage = ask_claude(sents, claude, ledger=ledger, reading=reading)
+    plan = build_plan(data, sents, reading)
+    if gaze_note:
+        plan.notes.append(gaze_note)
     plan.sermon_start, plan.sermon_end = start, end
     plan.usage = usage
     if not plan.highlights:

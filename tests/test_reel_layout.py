@@ -102,8 +102,8 @@ class TestVerseLines(unittest.TestCase):
         # QApplication (not QGuiApplication) so wizard-window tests can share it.
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_wraps_like_the_template_at_size_20(self) -> None:
-        self.assertEqual(DEFAULT_LAYOUT.verse_resolve_size, 20)
+    def test_wraps_within_the_template_width_at_size_18(self) -> None:
+        self.assertEqual(DEFAULT_LAYOUT.verse_resolve_size, 18)
         lines = verse_lines(
             "1 Corinthians 2:9",
             "However, as it is written: \u201cWhat no eye has seen, what no ear has heard, and what no "
@@ -113,10 +113,10 @@ class TestVerseLines(unittest.TestCase):
             [line.text for line in lines],
             [
                 "1 Corinthians 2:9",
-                "However, as it is written: \u201cWhat no eye has",
-                "seen, what no ear has heard, and what no",
-                "human mind has conceived\u201d\u2014 the things God",
-                "has prepared for those who love Him",
+                "However, as it is written: \u201cWhat no eye has seen,",
+                "what no ear has heard, and what no human mind",
+                "has conceived\u201d\u2014 the things God has prepared for",
+                "those who love Him",
             ],
         )
         self.assertEqual([line.bold for line in lines], [True, False, False, False, False])

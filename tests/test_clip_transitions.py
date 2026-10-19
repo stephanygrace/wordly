@@ -20,7 +20,7 @@ from services.transcribe import Caption
 
 
 class TestPaddedCuts(unittest.TestCase):
-    def test_clip_is_cut_with_allowance_and_hidden_fade_frames(self) -> None:
+    def test_clip_is_cut_with_hidden_fade_frames(self) -> None:
         cmds: list[list[str]] = []
         with TemporaryDirectory() as tmp, patch.object(
             multi_clip, "_run_ffmpeg", side_effect=lambda cmd, **_k: cmds.append(cmd)
@@ -28,9 +28,9 @@ class TestPaddedCuts(unittest.TestCase):
             multi_clip, "_output_looks_valid", return_value=True
         ):
             multi_clip.export_segment_clip(Path("sermon.mp4"), ClipSegment("00:10:00", "00:10:30"), Path(tmp) / "c.mp4")
-            multi_clip.export_segment_clip(Path("sermon.mp4"), ClipSegment("00:00:01", "00:00:20"), Path(tmp) / "d.mp4")
+            multi_clip.export_segment_clip(Path("sermon.mp4"), ClipSegment("00:00:00", "00:00:20"), Path(tmp) / "d.mp4")
         first, second = cmds
-        self.assertEqual((first[first.index("-ss") + 1], first[first.index("-to") + 1]), ("598.500", "631.500"))
+        self.assertEqual((first[first.index("-ss") + 1], first[first.index("-to") + 1]), ("599.500", "630.500"))
         self.assertEqual(second[second.index("-ss") + 1], "0.000")  # never before the video starts
 
 

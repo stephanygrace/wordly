@@ -67,6 +67,30 @@ class TestFindHighlightsInWizard(unittest.TestCase):
             self.assertIn("Total 85s", window._highlights_summary.text())
             window.close()
 
+    def test_pasted_times_become_60s_ranges_lux_scans(self) -> None:
+        import ui.wizard_window as ww
+
+        plan = HighlightPlan(highlights=[Highlight(3670.0, 3700.0, "Grace", "core")], usage=None)
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "service.mp4"
+            video.write_bytes(b"x")
+            window = ww.WizardWindow()
+            window._project.sermon_path = video
+            with mock.patch.object(ww, "api_key", return_value="sk-test"), mock.patch.object(
+                ww.QInputDialog, "getMultiLineText", return_value=("101\n112\n124\n149\n151", True)
+            ), mock.patch.object(ww.QMessageBox, "question") as asked, mock.patch.object(
+                ww, "find_highlights", return_value=plan
+            ) as finder:
+                window._paste_timestamps()
+                self._wait(window)
+            asked.assert_not_called()
+            self.assertEqual(
+                finder.call_args.kwargs["ranges"],
+                [(3660.0, 3720.0), (4320.0, 4380.0), (5040.0, 5100.0), (6540.0, 6600.0), (6660.0, 6720.0)],
+            )
+            self.assertEqual([s.label for s in window._project.segments], ["Grace"])
+            window.close()
+
     def test_find_sermon_adds_one_adjustable_clip(self) -> None:
         import ui.wizard_window as ww
 

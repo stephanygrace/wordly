@@ -68,7 +68,8 @@ class TestCaptionPreviewFollowsClip(unittest.TestCase):
                 player, "seek_seconds"
             ) as seek, mock.patch.object(player, "play") as play:
                 window._refresh_captions_step()
-                window._captions_table.setCurrentCell(2, 2)  # clip 2's caption
+                window._caption_clip_tabs.setCurrentIndex(1)  # review clip 2
+                window._captions_table.setCurrentCell(0, 2)
             load.assert_called_with(clips[1])
             seek.assert_called_with(0.0)
             play.assert_called()
@@ -119,7 +120,7 @@ class TestCaptionPreviewFollowsClip(unittest.TestCase):
             item = window._captions_table.item(2, 2)
             item.setText("ako ay naglalakad")
             self.assertEqual(_texts(window)[2], (3.7, 6.7, "ako ay naglalakad"))
-            self.assertIn("4 captions", window._captions_status.text())
+            self.assertIn("Clip 1 of 2: 3 captions", window._captions_status.text())
             window.close()
 
     def test_insert_after_selected_line_and_long_text_splits(self) -> None:
@@ -138,7 +139,7 @@ class TestCaptionPreviewFollowsClip(unittest.TestCase):
             self.assertEqual(
                 _texts(window)[2:], [(2.0, 3.5, "one two three"), (3.5, 5.0, "four five six")]
             )
-            self.assertEqual(table.rowCount(), 5)  # 4 in clip 1 + 1 in clip 2
+            self.assertEqual(table.rowCount(), 4)  # only clip 1's captions are listed
             window.close()
 
     def test_no_gap_splits_the_selected_caption_time(self) -> None:
@@ -172,6 +173,27 @@ class TestCaptionPreviewFollowsClip(unittest.TestCase):
             table.setCurrentCell(0, 2)
             window._delete_caption_line()
             self.assertEqual([c[2] for c in _texts(window)], ["na ba?"])
+            window.close()
+
+    def test_each_clip_is_reviewed_on_its_own(self) -> None:
+        with TemporaryDirectory() as tmp:
+            window, clips = self._window(tmp)
+            self._ready(window)
+            tabs, table = window._caption_clip_tabs, window._captions_table
+            self.assertEqual(tabs.count(), 2)
+            self.assertFalse(tabs.isHidden())
+            self.assertEqual([table.item(r, 2).text() for r in range(table.rowCount())], ["Naroon ka", "na ba?"])
+            tabs.setCurrentIndex(1)
+            self.assertEqual([table.item(r, 2).text() for r in range(table.rowCount())], ["God is good"])
+            window._caption_player.load_file.assert_called_with(clips[1])
+            self.assertIn("Clip 2 of 2: 1 captions", window._captions_status.text())
+            # A new line goes into the clip being reviewed.
+            table.setCurrentCell(-1, -1)
+            window._caption_clip_idx = None
+            window._insert_caption_line()
+            self.app.processEvents()
+            self.assertEqual([c.text for c in window._project.clip_captions[1]], ["God is good", ""])
+            self.assertEqual(len(window._project.clip_captions[0]), 2)
             window.close()
 
     def test_new_clips_reset_the_player(self) -> None:

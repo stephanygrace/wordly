@@ -137,3 +137,58 @@ def end_timecode_from_start_offset(
     if media_duration_s is not None and media_duration_s > 0 and end > media_duration_s:
         raise ValueError(f"End is after the sermon ends ({format_timecode(media_duration_s)}).")
     return format_timecode(end)
+
+
+def parse_timestamp_list(
+    text: str,
+    *,
+    length_s: float = 60.0,
+    media_duration_s: float | None = None,
+) -> list[tuple[float, float]]:
+    """Turn a pasted list of start times into *length_s* windows, sorted and merged.
+
+    One time per line (commas and spaces work too). Like the clip fields, bare
+    digits are hours and minutes: ``101`` → 1:01:00, ``149`` → 1:49:00, and
+    ``14930`` → 1:49:30. ``1:49`` is also 1:49:00; ``1:49:30`` is exact.
+    """
+    windows: list[tuple[float, float]] = []
+    for token in re.split(r"[\s,;]+", text.strip()):
+        if not token:
+            continue
+        if re.fullmatch(r"\d{1,4}", token):
+            hours, minutes = divmod(int(token), 100)
+            if minutes >= 60:
+                raise ValueError(f"{token!r}: minutes must be under 60.")
+            start = hours * 3600 + minutes * 60.0
+        elif re.fullmatch(r"\d{5,6}", token):
+            hours, rest = divmod(int(token), 10000)
+            minutes, seconds = divmod(rest, 100)
+            if minutes >= 60 or seconds >= 60:
+                raise ValueError(f"{token!r}: minutes and seconds must be under 60.")
+            start = hours * 3600 + minutes * 60.0 + seconds
+        elif re.fullmatch(r"\d+:\d{2}", token):
+            hours, minutes = (int(p) for p in token.split(":"))
+            if minutes >= 60:
+                raise ValueError(f"{token!r}: minutes must be under 60.")
+            start = hours * 3600 + minutes * 60.0
+        else:
+            try:
+                start = parse_timecode(token).total_seconds
+            except ValueError:
+                raise ValueError(f"Can't read {token!r} as a time.") from None
+        end = start + length_s
+        if media_duration_s is not None and media_duration_s > 0:
+            if start >= media_duration_s:
+                raise ValueError(f"{token!r} is after the video ends ({format_timecode(media_duration_s)}).")
+            end = min(end, media_duration_s)
+        windows.append((start, end))
+    if not windows:
+        raise ValueError("Paste at least one timestamp.")
+    windows.sort()
+    merged = [windows[0]]
+    for start, end in windows[1:]:
+        if start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged

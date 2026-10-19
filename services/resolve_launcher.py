@@ -236,7 +236,16 @@ def _scripts_menu_items() -> list[str] | None:
     )
     if code != 0:
         # -1719/-1728 just mean Resolve's process or menu isn't up yet; keep polling.
-        if "assistive access" in out or "-25211" in out or "-1743" in out:
+        if "-1743" in out:
+            # Automation (Apple Events) is a separate macOS permission from Accessibility.
+            raise ResolveOpenError(
+                "macOS blocked Wordly from controlling System Events, so it can't click "
+                f"Resolve's Workspace → Scripts → {IMPORT_SCRIPT_NAME}.\n"
+                "System Settings → Privacy & Security → Automation → under the app running "
+                "Wordly (Terminal, VS Code or Python) turn on System Events, then click "
+                "Generate again."
+            )
+        if "assistive access" in out or "-25211" in out:
             raise ResolveOpenError(
                 "Wordly needs Accessibility permission to open the project in Resolve.\n"
                 "System Settings → Privacy & Security → Accessibility → enable the app "
