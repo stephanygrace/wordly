@@ -5,6 +5,7 @@ from dataclasses import replace
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -202,7 +203,7 @@ class TestGenerateResolveProject(unittest.TestCase):
             self.assertEqual(project.resolve_output_path, timeline)
 
 
-    def test_music_fades_out_over_the_last_three_seconds(self) -> None:
+    def test_music_fades_in_and_out_over_three_seconds(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             clip = root / "src_clip.mp4"
@@ -233,9 +234,35 @@ class TestGenerateResolveProject(unittest.TestCase):
             fade = next(c for c in calls if any("afade" in a for a in c))
             # The reel is 20 s (21 s minus the hidden half second at each end).
             self.assertEqual(fade[fade.index("-t") + 1], "20.000")
-            self.assertEqual(fade[fade.index("-af") + 1], "afade=t=out:st=17.000:d=3.000")
+            self.assertEqual(fade[fade.index("-af") + 1], "afade=t=in:st=0:d=3.000,afade=t=out:st=17.000:d=3.000")
             assets = ET.parse(timeline).getroot().findall("./resources/asset")
             self.assertTrue(any(a.get("src", "").endswith("media/instrumental_fade.m4a") for a in assets))
+
+    def test_music_skips_the_songs_opening_silence(self) -> None:
+        from services.resolve_export import _fade_music
+
+        with TemporaryDirectory() as tmp:
+            music = Path(tmp) / "bed.mp3"
+            music.write_bytes(b"\x00" * 128)
+            calls: list[list[str]] = []
+
+            def fake_run(cmd, **_kw):
+                calls.append(cmd)
+                if "-af" in cmd and cmd[cmd.index("-af") + 1].startswith("silencedetect"):
+                    return SimpleNamespace(stderr="[silencedetect] silence_start: 0\n"
+                                                  "[silencedetect] silence_end: 9.8245 | silence_duration: 9.8245\n")
+                Path(cmd[-1]).write_bytes(b"aac")
+                return SimpleNamespace(stderr="")
+
+            with patch("services.resolve_export._safe_duration", return_value=180.0), patch(
+                "services.resolve_export.subprocess.run", side_effect=fake_run
+            ):
+                out = _fade_music(music, end_s=20.0)
+
+            fade = calls[-1]
+            self.assertEqual(fade[fade.index("-ss") + 1], "9.825")
+            self.assertEqual(fade[fade.index("-t") + 1], "20.000")
+            self.assertEqual(out.name, "bed_fade.m4a")
 
     def test_generate_uses_reviewed_captions_without_transcribing(self) -> None:
         with TemporaryDirectory() as tmp:
